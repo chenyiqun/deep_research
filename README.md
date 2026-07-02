@@ -22,6 +22,7 @@ drb_qwen/
 scripts/
   download_drb_data.py  # downloads query/criteria/reference files
   run_qwen3_8b_smoke.sh # server smoke run with Qwen3-8B
+  launch_qwen3_8b_smoke_bg.sh # nohup background launcher
 tests/
   smoke_test_scoring.py # no-GPU sanity test for scoring logic
 ```
@@ -48,6 +49,19 @@ cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
 bash scripts/run_qwen3_8b_smoke.sh
 ```
 
+Run it in the background so SSH can disconnect safely:
+
+```bash
+cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+bash scripts/launch_qwen3_8b_smoke_bg.sh
+```
+
+The launcher prints the PID and log path. You can monitor with:
+
+```bash
+tail -f /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_8b_smoke/logs/run_*.log
+```
+
 The script writes terminal output to a timestamped log file under:
 
 ```text
@@ -58,6 +72,12 @@ Override the number of tasks if needed:
 
 ```bash
 LIMIT=5 bash scripts/run_qwen3_8b_smoke.sh
+```
+
+Or in the background:
+
+```bash
+LIMIT=5 bash scripts/launch_qwen3_8b_smoke_bg.sh
 ```
 
 Use a custom log file if needed:
