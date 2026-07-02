@@ -11,6 +11,9 @@ from .prompts import REPORT_SYSTEM_PROMPT, build_report_prompt
 from .vllm_chat import GenerationConfig, VLLMChatModel
 
 
+DEFAULT_QWEN3_8B_PATH = "/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B"
+
+
 def batched(items: list[Any], batch_size: int) -> list[list[Any]]:
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
@@ -19,7 +22,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate DeepResearch-style reports with Qwen via vLLM.")
     parser.add_argument("--query-file", required=True, help="Path to query.jsonl.")
     parser.add_argument("--output-file", required=True, help="Output JSONL report file.")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="HF model id or local path.")
+    parser.add_argument("--model", default=DEFAULT_QWEN3_8B_PATH, help="HF model id or local path.")
     parser.add_argument("--only-lang", choices=["zh", "en"], default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true", help="Skip IDs already present in output file.")
@@ -32,6 +35,11 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable Qwen3 thinking mode. Default is off so reports do not include <think> blocks.",
+    )
     args = parser.parse_args()
 
     tasks = load_jsonl(args.query_file)
@@ -50,11 +58,13 @@ def main() -> None:
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
+        enable_thinking=args.enable_thinking,
     )
     gen_config = GenerationConfig(
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.max_tokens,
+        strip_thinking=True,
     )
 
     output_path = Path(args.output_file)

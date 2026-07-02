@@ -21,8 +21,37 @@ drb_qwen/
   vllm_chat.py          # lazy vLLM chat wrapper
 scripts/
   download_drb_data.py  # downloads query/criteria/reference files
+  run_qwen3_8b_smoke.sh # server smoke run with Qwen3-8B
 tests/
   smoke_test_scoring.py # no-GPU sanity test for scoring logic
+```
+
+## Your Server Paths
+
+The scripts are ready for the current server layout:
+
+```text
+Repo:
+/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+
+Data:
+/mnt/tidal-alsh01/usr/chenyiqun/datasets/DeepResearch/deep_research_bench_data
+
+Qwen3-8B:
+/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B
+```
+
+Run a 2-task end-to-end smoke test:
+
+```bash
+cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+bash scripts/run_qwen3_8b_smoke.sh
+```
+
+Override the number of tasks if needed:
+
+```bash
+LIMIT=5 bash scripts/run_qwen3_8b_smoke.sh
 ```
 
 ## Install
@@ -56,10 +85,11 @@ Start with a tiny run:
 python -m drb_qwen.generate_reports \
   --query-file data/drb/query.jsonl \
   --output-file outputs/qwen_reports.jsonl \
-  --model Qwen/Qwen2.5-7B-Instruct \
+  --model /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B \
   --limit 2 \
-  --batch-size 2 \
-  --max-tokens 4096
+  --batch-size 1 \
+  --max-model-len 32768 \
+  --max-tokens 8192
 ```
 
 For a larger Qwen model, change `--model`, `--tensor-parallel-size`, and `--max-model-len`:
@@ -93,8 +123,9 @@ python -m drb_qwen.evaluate_race \
   --reference-file data/drb/reference.jsonl \
   --output-file outputs/race_raw_results.jsonl \
   --summary-file outputs/race_summary.json \
-  --judge-model Qwen/Qwen2.5-7B-Instruct \
+  --judge-model /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B \
   --limit 2 \
+  --max-model-len 32768 \
   --max-tokens 8192
 ```
 
@@ -144,8 +175,8 @@ PYTHONPATH=. python tests/smoke_test_scoring.py
 ## Practical Notes
 
 - Run generation and judging as separate commands. This avoids keeping two large models in GPU memory.
+- Qwen3 thinking mode is disabled by default in this code path for cleaner reports and parseable judge JSON. Pass `--enable-thinking` only if you really want it.
 - Use `--resume` for long runs.
 - Keep `--temperature 0` for judging.
 - Use a stronger Qwen model for judging than for report generation when possible.
 - For long reference reports, set a larger `--max-model-len`; otherwise vLLM may truncate or reject prompts.
-

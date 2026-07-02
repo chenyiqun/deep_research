@@ -10,6 +10,7 @@ class GenerationConfig:
     top_p: float = 0.95
     max_tokens: int = 8192
     stop: list[str] | None = None
+    strip_thinking: bool = True
 
 
 class VLLMChatModel:
@@ -27,6 +28,7 @@ class VLLMChatModel:
         gpu_memory_utilization: float = 0.90,
         max_model_len: int | None = None,
         enforce_eager: bool = False,
+        enable_thinking: bool | None = False,
     ) -> None:
         try:
             from vllm import LLM
@@ -47,6 +49,7 @@ class VLLMChatModel:
             kwargs["max_model_len"] = max_model_len
 
         self.model_name = model_name
+        self.enable_thinking = enable_thinking
         self.llm = LLM(**kwargs)
         self.tokenizer = self.llm.get_tokenizer()
 
@@ -57,11 +60,18 @@ class VLLMChatModel:
         messages.append({"role": "user", "content": user_prompt})
 
         if hasattr(self.tokenizer, "apply_chat_template"):
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            kwargs = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            if self.enable_thinking is not None:
+                kwargs["enable_thinking"] = self.enable_thinking
+            try:
+                return self.tokenizer.apply_chat_template(messages, **kwargs)
+            except TypeError:
+                # Older Qwen/Llama tokenizers do not know enable_thinking.
+                kwargs.pop("enable_thinking", None)
+                return self.tokenizer.apply_chat_template(messages, **kwargs)
 
         if system_prompt:
             return f"<|system|>\n{system_prompt}\n<|user|>\n{user_prompt}\n<|assistant|>\n"
@@ -93,6 +103,17 @@ class VLLMChatModel:
             if not output.outputs:
                 texts.append("")
             else:
-                texts.append(output.outputs[0].text.strip())
+                text = output.outputs[0].text.strip()
+                if config.strip_thinking:
+                    text = strip_thinking_blocks(text).strip()
+                texts.append(text)
         return texts
 
+
+def strip_thinking_blocks(text: str) -> str:
+    """Remove Qwen3-style hidden reasoning blocks from returned text."""
+    if "</think>" in text:
+        return text.split("</think>", 1)[1].lstrip()
+    if text.startswith("<think>") and "</think>" not in text:
+        return ""
+    return text

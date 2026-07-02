@@ -17,6 +17,9 @@ from .scoring import summarize_fact
 from .vllm_chat import GenerationConfig, VLLMChatModel
 
 
+DEFAULT_QWEN3_8B_PATH = "/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B"
+
+
 URL_RE = re.compile(r"https?://[^\s\])}>\"']+")
 
 
@@ -122,7 +125,7 @@ def main() -> None:
     parser.add_argument("--reports-file", required=True)
     parser.add_argument("--output-file", required=True)
     parser.add_argument("--summary-file", required=True)
-    parser.add_argument("--judge-model", default="Qwen/Qwen2.5-7B-Instruct")
+    parser.add_argument("--judge-model", default=DEFAULT_QWEN3_8B_PATH)
     parser.add_argument("--only-lang", choices=["zh", "en"], default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
@@ -138,6 +141,11 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="Enable Qwen3 thinking mode. Default is off for cleaner parseable JSON.",
+    )
     args = parser.parse_args()
 
     tasks = load_jsonl(args.query_file)
@@ -157,11 +165,13 @@ def main() -> None:
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
+        enable_thinking=args.enable_thinking,
     )
     gen_config = GenerationConfig(
         temperature=args.temperature,
         top_p=args.top_p,
         max_tokens=args.max_tokens,
+        strip_thinking=True,
     )
 
     output_path = Path(args.output_file)
