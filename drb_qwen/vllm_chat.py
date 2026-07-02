@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Iterable
 
 
@@ -29,7 +30,11 @@ class VLLMChatModel:
         max_model_len: int | None = None,
         enforce_eager: bool = False,
         enable_thinking: bool | None = False,
+        gpu_devices: str | None = None,
     ) -> None:
+        if gpu_devices:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_devices
+
         try:
             from vllm import LLM
         except ImportError as exc:

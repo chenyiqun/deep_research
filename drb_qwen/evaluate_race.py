@@ -91,6 +91,11 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument(
+        "--gpu-devices",
+        default=None,
+        help="Comma-separated single-node GPU IDs, e.g. 0,1,2,3,4,5,6,7. Sets CUDA_VISIBLE_DEVICES before vLLM loads.",
+    )
     parser.add_argument("--dtype", default="auto")
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
@@ -114,6 +119,9 @@ def main() -> None:
         return
 
     print(f"Loading judge model: {args.judge_model}")
+    if args.gpu_devices:
+        print(f"CUDA_VISIBLE_DEVICES: {args.gpu_devices}")
+    print(f"Tensor parallel size: {args.tensor_parallel_size}")
     model = VLLMChatModel(
         model_name=args.judge_model,
         tensor_parallel_size=args.tensor_parallel_size,
@@ -122,6 +130,7 @@ def main() -> None:
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
         enable_thinking=args.enable_thinking,
+        gpu_devices=args.gpu_devices,
     )
     gen_config = GenerationConfig(
         temperature=args.temperature,

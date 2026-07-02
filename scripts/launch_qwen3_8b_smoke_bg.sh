@@ -19,6 +19,12 @@ nohup env \
   RUN_ID="${RUN_ID}" \
   LOG_FILE="${LOG_FILE}" \
   LIMIT="${LIMIT:-2}" \
+  GPU_DEVICES="${GPU_DEVICES:-0,1,2,3,4,5,6,7}" \
+  TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}" \
+  BATCH_SIZE="${BATCH_SIZE:-1}" \
+  MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}" \
+  MAX_TOKENS="${MAX_TOKENS:-8192}" \
+  GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}" \
   DATA_DIR="${DATA_DIR:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/DeepResearch/deep_research_bench_data}" \
   MODEL_PATH="${MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B}" \
   bash "${REPO_DIR}/scripts/run_qwen3_8b_smoke.sh" \
@@ -37,4 +43,3 @@ echo "tail -f ${LOG_FILE}"
 echo
 echo "Check process:"
 echo "ps -p ${PID} -f"
-

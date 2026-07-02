@@ -80,6 +80,26 @@ Or in the background:
 LIMIT=5 bash scripts/launch_qwen3_8b_smoke_bg.sh
 ```
 
+Run all 100 tasks on a single 8-GPU node in the background:
+
+```bash
+LIMIT=100 \
+OUT_DIR=/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_8b_full100 \
+GPU_DEVICES=0,1,2,3,4,5,6,7 \
+TENSOR_PARALLEL_SIZE=8 \
+bash scripts/launch_qwen3_8b_smoke_bg.sh
+```
+
+Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
+
+```bash
+LIMIT=100 \
+OUT_DIR=/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_8b_full100_4gpu \
+GPU_DEVICES=0,1,2,3 \
+TENSOR_PARALLEL_SIZE=4 \
+bash scripts/launch_qwen3_8b_smoke_bg.sh
+```
+
 Use a custom log file if needed:
 
 ```bash
@@ -132,6 +152,7 @@ python -m drb_qwen.generate_reports \
   --query-file data/drb/query.jsonl \
   --output-file outputs/qwen_reports.jsonl \
   --model Qwen/Qwen2.5-72B-Instruct \
+  --gpu-devices 0,1,2,3 \
   --tensor-parallel-size 4 \
   --max-model-len 32768 \
   --max-tokens 8192 \
