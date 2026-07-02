@@ -6,9 +6,18 @@ DATA_DIR="${DATA_DIR:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/DeepResearch/deep
 MODEL_PATH="${MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B}"
 OUT_DIR="${OUT_DIR:-${REPO_DIR}/outputs/qwen3_8b_smoke}"
 LIMIT="${LIMIT:-2}"
+LOG_DIR="${LOG_DIR:-${OUT_DIR}/logs}"
+RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/run_${RUN_ID}.log}"
 
 cd "${REPO_DIR}"
-mkdir -p "${OUT_DIR}"
+mkdir -p "${OUT_DIR}" "${LOG_DIR}"
+
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "Run ID: ${RUN_ID}"
+echo "Log: ${LOG_FILE}"
+echo "Started at: $(date -Iseconds)"
 
 echo "Repo: ${REPO_DIR}"
 echo "Data: ${DATA_DIR}"
@@ -49,4 +58,6 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.evaluate_race \
 
 echo "Done. Summary:"
 cat "${OUT_DIR}/race_summary.json"
-
+echo
+echo "Finished at: $(date -Iseconds)"
+echo "Log saved to: ${LOG_FILE}"

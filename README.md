@@ -48,10 +48,23 @@ cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
 bash scripts/run_qwen3_8b_smoke.sh
 ```
 
+The script writes terminal output to a timestamped log file under:
+
+```text
+/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_8b_smoke/logs/
+```
+
 Override the number of tasks if needed:
 
 ```bash
 LIMIT=5 bash scripts/run_qwen3_8b_smoke.sh
+```
+
+Use a custom log file if needed:
+
+```bash
+LOG_FILE=/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_8b_smoke/my_run.log \
+  bash scripts/run_qwen3_8b_smoke.sh
 ```
 
 ## Install
