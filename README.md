@@ -90,6 +90,76 @@ TENSOR_PARALLEL_SIZE=8 \
 bash scripts/launch_qwen3_8b_smoke_bg.sh
 ```
 
+## Async Multi-Agent Deep Research Workflow
+
+The async workflow is closer to a real deep-research system:
+
+```text
+global information state
+-> main agent plans searchable queries
+-> web search returns top-k results
+-> per-URL reader agents extract core information in parallel
+-> query summarizer synthesizes reader notes
+-> state updater emits only new/corrected information
+-> main agent writes final report from the global state
+-> async RACE judge evaluates against DRB reference reports
+```
+
+This path uses an OpenAI-compatible vLLM server, so generation and judging can run many requests concurrently without repeatedly loading the model.
+
+Start Qwen3-32B as a vLLM server:
+
+```bash
+cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+
+MODEL_PATH=/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-32B \
+SERVED_MODEL_NAME=qwen3-32b \
+GPU_DEVICES=0,1,2,3,4,5,6,7 \
+TENSOR_PARALLEL_SIZE=8 \
+MAX_MODEL_LEN=32768 \
+bash scripts/start_qwen3_32b_vllm_server.sh
+```
+
+After the server finishes loading, check it:
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+```
+
+Run the async multi-agent workflow and async RACE judge in the background:
+
+```bash
+cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+
+export WEB_SEARCH_API_KEY=<your_prod_web_search_key>
+
+LIMIT=100 \
+OUT_DIR=/mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_32b_async_research_full100 \
+VLLM_BASE_URL=http://127.0.0.1:8000/v1 \
+VLLM_MODEL=qwen3-32b \
+MAX_CONCURRENT_TASKS=4 \
+MAX_CONCURRENT_LLM_CALLS=16 \
+MAX_ROUNDS=3 \
+MAX_SEARCH_QUERIES_PER_ROUND=3 \
+SEARCH_TOP_K=5 \
+bash scripts/launch_qwen3_32b_async_research_bg.sh
+```
+
+Monitor the run:
+
+```bash
+tail -f /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research/outputs/qwen3_32b_async_research_full100/logs/run_*.log
+```
+
+Outputs:
+
+```text
+qwen3_32b_async_research_reports.jsonl  # report outputs, compatible with evaluate_race
+race_raw_results.jsonl                  # async LLM-as-judge raw results
+race_summary.json                       # aggregate RACE scores
+traces/<id>.json                        # per-task search/read/state trace
+```
+
 Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
 
 ```bash

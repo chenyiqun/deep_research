@@ -3,4 +3,4 @@ torch
 transformers
 tqdm
 requests
-
+aiohttp
