@@ -101,7 +101,7 @@ class URLContentFetcher:
                     if attempt >= self.config.max_retries:
                         break
                     await asyncio.sleep(self.config.retry_sleep_s * attempt)
-            return URLFetchResult(url=url, ok=False, error=str(last_error), visit_error=visit_error)
+            return URLFetchResult(url=url, ok=False, error=format_exception(last_error), visit_error=visit_error)
 
     async def _fetch_with_visit_server(self, url: str, goal: str) -> URLFetchResult:
         assert self._session is not None
@@ -152,7 +152,7 @@ class URLContentFetcher:
                 if attempt >= self.config.max_retries:
                     break
                 await asyncio.sleep(self.config.retry_sleep_s * attempt)
-        return URLFetchResult(url=url, ok=False, error=str(last_error), source="visit_server")
+        return URLFetchResult(url=url, ok=False, error=format_exception(last_error), source="visit_server")
 
     async def _fetch_once(self, url: str) -> URLFetchResult:
         assert self._session is not None
@@ -261,6 +261,13 @@ def looks_like_html(text: str) -> bool:
 
 
 def extract_text_from_pdf(body: bytes) -> str:
+    text = extract_text_from_pdf_with_pypdf(body)
+    if text:
+        return text
+    return extract_text_from_pdf_with_pdfminer(body)
+
+
+def extract_text_from_pdf_with_pypdf(body: bytes) -> str:
     try:
         from pypdf import PdfReader
     except Exception:
@@ -276,6 +283,27 @@ def extract_text_from_pdf(body: bytes) -> str:
         return clean_text("\n".join(texts))
     except Exception:
         return ""
+
+
+def extract_text_from_pdf_with_pdfminer(body: bytes) -> str:
+    try:
+        from pdfminer.high_level import extract_text
+    except Exception:
+        return ""
+
+    try:
+        return clean_text(extract_text(BytesIO(body)) or "")
+    except Exception:
+        return ""
+
+
+def format_exception(exc: Exception | None) -> str:
+    if exc is None:
+        return "unknown error"
+    message = str(exc).strip()
+    if message:
+        return message
+    return exc.__class__.__name__
 
 
 class _HTMLTextExtractor(HTMLParser):
