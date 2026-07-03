@@ -88,7 +88,7 @@ class AsyncDeepResearchWorkflow:
                 break
 
             search_results_by_query = await self._search_all(search_queries)
-            reader_sources, source_fetches = await self._prepare_reader_sources(search_results_by_query)
+            reader_sources, source_fetches = await self._prepare_reader_sources(search_results_by_query, task)
             reader_notes = await self._read_all_results(reader_sources, task)
             query_summaries = await self._summarize_by_query(task, search_results_by_query, reader_notes)
             state_patch = await self._update_state(task, state, query_summaries, round_idx)
@@ -168,13 +168,17 @@ class AsyncDeepResearchWorkflow:
     async def _prepare_reader_sources(
         self,
         search_results_by_query: dict[str, list[SearchResult]],
+        task: dict[str, Any],
     ) -> tuple[list[SearchResult], list[dict[str, Any]]]:
         deduped = dedupe_search_results(search_results_by_query)
         if not self.config.fetch_full_content or self.content_fetcher is None:
             return deduped, []
 
         fetches = await asyncio.gather(
-            *(self.content_fetcher.fetch(result.link) for result in deduped),
+            *(
+                self.content_fetcher.fetch(result.link, goal=build_url_visit_goal(task, result))
+                for result in deduped
+            ),
             return_exceptions=True,
         )
         reader_sources: list[SearchResult] = []
@@ -859,6 +863,26 @@ def build_reader_source_content(
     if not fallback_parts:
         fallback_parts.append("No source text was available from search snippet or URL fetch.")
     return "\n\n".join(fallback_parts), False
+
+
+def build_url_visit_goal(task: dict[str, Any], result: SearchResult) -> str:
+    if task.get("language") == "zh":
+        return (
+            "请抽取网页中最有助于回答原始研究问题、且与本轮搜索 query 相关的正文内容。"
+            "优先保留事实、数据、日期、主体、观点、证据和不确定性。"
+            "忽略导航栏、广告、评论、版权声明和无关段落。\n"
+            f"原始研究问题: {task.get('prompt', '')}\n"
+            f"搜索 query: {result.search_query}\n"
+            f"搜索结果标题: {result.title}"
+        )
+    return (
+        "Extract the webpage content most relevant to the original research question and this search query. "
+        "Prefer concrete facts, statistics, dates, entities, arguments, and evidence. "
+        "Ignore navigation, ads, comments, boilerplate, and unrelated sections.\n"
+        f"Original research question: {task.get('prompt', '')}\n"
+        f"Search query: {result.search_query}\n"
+        f"Search result title: {result.title}"
+    )
 
 
 def ensure_string_list(value: Any) -> list[str]:

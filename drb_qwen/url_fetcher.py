@@ -19,6 +19,9 @@ DEFAULT_USER_AGENT = (
 @dataclass
 class URLFetchConfig:
     timeout_s: int = 30
+    visit_endpoint: str = ""
+    visit_timeout_s: int = 60
+    visit_fallback_to_direct_fetch: bool = True
     max_concurrent_requests: int = 16
     max_retries: int = 2
     retry_sleep_s: float = 1.0
@@ -36,6 +39,8 @@ class URLFetchResult:
     final_url: str = ""
     text: str = ""
     error: str = ""
+    source: str = "direct"
+    visit_error: str = ""
     truncated_bytes: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -69,7 +74,7 @@ class URLContentFetcher:
             await self._session.close()
         self._session = None
 
-    async def fetch(self, url: str) -> URLFetchResult:
+    async def fetch(self, url: str, goal: str = "") -> URLFetchResult:
         if self._session is None:
             raise RuntimeError("URLContentFetcher must be used as an async context manager.")
 
@@ -78,16 +83,76 @@ class URLContentFetcher:
             return URLFetchResult(url=url, ok=False, error="unsupported or empty URL")
 
         async with self._semaphore:
+            visit_error = ""
+            if self.config.visit_endpoint:
+                visit_result = await self._fetch_with_visit_server(url, goal)
+                if visit_result.ok or not self.config.visit_fallback_to_direct_fetch:
+                    return visit_result
+                visit_error = visit_result.error
+
             last_error: Exception | None = None
             for attempt in range(1, self.config.max_retries + 1):
                 try:
-                    return await self._fetch_once(url)
+                    result = await self._fetch_once(url)
+                    result.visit_error = visit_error
+                    return result
                 except Exception as exc:
                     last_error = exc
                     if attempt >= self.config.max_retries:
                         break
                     await asyncio.sleep(self.config.retry_sleep_s * attempt)
-            return URLFetchResult(url=url, ok=False, error=str(last_error))
+            return URLFetchResult(url=url, ok=False, error=str(last_error), visit_error=visit_error)
+
+    async def _fetch_with_visit_server(self, url: str, goal: str) -> URLFetchResult:
+        assert self._session is not None
+        endpoint = normalize_visit_endpoint(self.config.visit_endpoint)
+        last_error: Exception | None = None
+        try:
+            import aiohttp
+        except ImportError as exc:
+            return URLFetchResult(url=url, ok=False, error=str(exc), source="visit_server")
+
+        for attempt in range(1, self.config.max_retries + 1):
+            try:
+                timeout = aiohttp.ClientTimeout(total=self.config.visit_timeout_s)
+                async with self._session.post(
+                    endpoint,
+                    json={"url": url, "goal": goal},
+                    timeout=timeout,
+                ) as response:
+                    raw_text = await response.text()
+                    if response.status >= 400:
+                        return URLFetchResult(
+                            url=url,
+                            ok=False,
+                            status=response.status,
+                            content_type=response.headers.get("content-type", ""),
+                            final_url=url,
+                            error=f"visit server HTTP {response.status}: {raw_text[:500]}",
+                            source="visit_server",
+                        )
+                    try:
+                        data = await response.json(content_type=None)
+                    except Exception:
+                        data = {"content": raw_text}
+                    content = data.get("content", "") if isinstance(data, dict) else ""
+                    content = clean_text(str(content))
+                    return URLFetchResult(
+                        url=url,
+                        ok=bool(content),
+                        status=response.status,
+                        content_type=response.headers.get("content-type", ""),
+                        final_url=url,
+                        text=content[: self.config.max_extracted_chars],
+                        error="" if content else "visit server returned empty content",
+                        source="visit_server",
+                    )
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.config.max_retries:
+                    break
+                await asyncio.sleep(self.config.retry_sleep_s * attempt)
+        return URLFetchResult(url=url, ok=False, error=str(last_error), source="visit_server")
 
     async def _fetch_once(self, url: str) -> URLFetchResult:
         assert self._session is not None
@@ -121,6 +186,7 @@ class URLContentFetcher:
                 final_url=final_url,
                 text=text,
                 error="" if text.strip() else "no extractable text",
+                source="direct",
                 truncated_bytes=truncated,
             )
 
@@ -146,6 +212,15 @@ async def read_limited(response: Any, max_bytes: int) -> tuple[bytes, bool]:
 def should_try_fetch_url(url: str) -> bool:
     parsed = urlparse(str(url).strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def normalize_visit_endpoint(value: str) -> str:
+    endpoint = str(value).strip().rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/visit"):
+        return endpoint
+    return endpoint + "/visit"
 
 
 def extract_response_text(

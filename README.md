@@ -147,6 +147,7 @@ VLLM_MODEL=qwen3-32b \
 MAX_CONCURRENT_TASKS=4 \
 MAX_CONCURRENT_LLM_CALLS=16 \
 URL_FETCH_ENABLED=1 \
+URL_VISIT_ENDPOINT= \
 MAX_CONCURRENT_URL_FETCHES=16 \
 URL_FETCH_TIMEOUT_S=30 \
 MAX_ROUNDS=3 \
@@ -171,6 +172,8 @@ traces/<id>.json                        # per-task search/read/state trace
 ```
 
 `URL_FETCH_ENABLED=1` makes the workflow fetch each top-k search result URL and feed the reader the extracted page text. If fetching fails or the extracted text is too short, the reader falls back to the web-search snippet and records the fetch status in `traces/<id>.json`.
+
+If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. The workflow will call `POST /visit` with `{"url": ..., "goal": ...}` first, then fall back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`.
 
 Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
 

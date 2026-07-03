@@ -130,6 +130,9 @@ async def run_async(args: argparse.Namespace) -> None:
     )
     url_fetch_config = URLFetchConfig(
         timeout_s=args.url_fetch_timeout_s,
+        visit_endpoint=args.url_visit_endpoint,
+        visit_timeout_s=args.url_visit_timeout_s,
+        visit_fallback_to_direct_fetch=not args.disable_url_visit_fallback,
         max_concurrent_requests=args.max_concurrent_url_fetches,
         max_retries=args.url_fetch_max_retries,
         max_bytes=args.url_fetch_max_bytes,
@@ -145,6 +148,8 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Search top-k: {args.search_top_k}")
     print(f"URL fetch enabled: {not args.disable_url_fetch}")
     if not args.disable_url_fetch:
+        if args.url_visit_endpoint:
+            print(f"URL visit endpoint: {args.url_visit_endpoint}")
         print(f"Max concurrent URL fetches: {args.max_concurrent_url_fetches}")
         print(f"URL fetch timeout: {args.url_fetch_timeout_s}s")
         print(f"URL fetch max bytes: {args.url_fetch_max_bytes}")
@@ -214,6 +219,9 @@ def main() -> None:
     parser.add_argument("--search-max-retries", type=int, default=3)
     parser.add_argument("--max-concurrent-searches", type=int, default=8)
     parser.add_argument("--disable-url-fetch", action="store_true")
+    parser.add_argument("--url-visit-endpoint", default="")
+    parser.add_argument("--url-visit-timeout-s", type=int, default=60)
+    parser.add_argument("--disable-url-visit-fallback", action="store_true")
     parser.add_argument("--max-concurrent-url-fetches", type=int, default=16)
     parser.add_argument("--url-fetch-timeout-s", type=int, default=30)
     parser.add_argument("--url-fetch-max-retries", type=int, default=2)

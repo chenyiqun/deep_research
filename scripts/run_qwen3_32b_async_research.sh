@@ -14,6 +14,9 @@ MAX_CONCURRENT_LLM_CALLS="${MAX_CONCURRENT_LLM_CALLS:-16}"
 MAX_CONCURRENT_SEARCHES="${MAX_CONCURRENT_SEARCHES:-8}"
 MAX_CONCURRENT_READERS="${MAX_CONCURRENT_READERS:-12}"
 URL_FETCH_ENABLED="${URL_FETCH_ENABLED:-1}"
+URL_VISIT_ENDPOINT="${URL_VISIT_ENDPOINT:-}"
+URL_VISIT_TIMEOUT_S="${URL_VISIT_TIMEOUT_S:-60}"
+URL_VISIT_FALLBACK_ENABLED="${URL_VISIT_FALLBACK_ENABLED:-1}"
 MAX_CONCURRENT_URL_FETCHES="${MAX_CONCURRENT_URL_FETCHES:-16}"
 URL_FETCH_TIMEOUT_S="${URL_FETCH_TIMEOUT_S:-30}"
 URL_FETCH_MAX_RETRIES="${URL_FETCH_MAX_RETRIES:-2}"
@@ -54,6 +57,7 @@ echo "Web search endpoint: ${WEB_SEARCH_ENDPOINT}"
 echo "Max concurrent tasks: ${MAX_CONCURRENT_TASKS}"
 echo "Max concurrent LLM calls: ${MAX_CONCURRENT_LLM_CALLS}"
 echo "URL fetch enabled: ${URL_FETCH_ENABLED}"
+echo "URL visit endpoint: ${URL_VISIT_ENDPOINT}"
 echo "Max concurrent URL fetches: ${MAX_CONCURRENT_URL_FETCHES}"
 echo "URL fetch timeout seconds: ${URL_FETCH_TIMEOUT_S}"
 echo "URL fetch max bytes: ${URL_FETCH_MAX_BYTES}"
@@ -83,6 +87,15 @@ URL_FETCH_ARGS=()
 case "${URL_FETCH_ENABLED}" in
   0|false|False|FALSE|no|No|NO)
     URL_FETCH_ARGS+=(--disable-url-fetch)
+    ;;
+esac
+if [[ -n "${URL_VISIT_ENDPOINT}" ]]; then
+  URL_FETCH_ARGS+=(--url-visit-endpoint "${URL_VISIT_ENDPOINT}")
+  URL_FETCH_ARGS+=(--url-visit-timeout-s "${URL_VISIT_TIMEOUT_S}")
+fi
+case "${URL_VISIT_FALLBACK_ENABLED}" in
+  0|false|False|FALSE|no|No|NO)
+    URL_FETCH_ARGS+=(--disable-url-visit-fallback)
     ;;
 esac
 

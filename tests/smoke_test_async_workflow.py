@@ -98,7 +98,8 @@ class FakeSearchClient:
 
 
 class FakeContentFetcher:
-    async def fetch(self, url: str) -> URLFetchResult:
+    async def fetch(self, url: str, goal: str = "") -> URLFetchResult:
+        assert "Search query" in goal
         return URLFetchResult(
             url=url,
             ok=True,
