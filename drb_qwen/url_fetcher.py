@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
+import json
 import re
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -28,6 +31,8 @@ class URLFetchConfig:
     max_bytes: int = 2_000_000
     max_extracted_chars: int = 50_000
     user_agent: str = DEFAULT_USER_AGENT
+    cache_dir: str = ""
+    cache_errors: bool = False
 
 
 @dataclass
@@ -42,12 +47,20 @@ class URLFetchResult:
     source: str = "direct"
     visit_error: str = ""
     truncated_bytes: bool = False
+    cached: bool = False
+    extraction_method: str = ""
+    raw_text_chars: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["text_chars"] = len(self.text)
+        if not data.get("raw_text_chars"):
+            data["raw_text_chars"] = len(self.text)
         data.pop("text", None)
         return data
+
+
+URL_FETCH_RESULT_FIELDS = set(URLFetchResult.__dataclass_fields__)
 
 
 class URLContentFetcher:
@@ -65,7 +78,13 @@ class URLContentFetcher:
             raise RuntimeError("Install aiohttp to use async URL fetching.") from exc
 
         timeout = aiohttp.ClientTimeout(total=self.config.timeout_s)
-        headers = {"User-Agent": self.config.user_agent}
+        headers = {
+            "User-Agent": self.config.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.8,*/*;q=0.7",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
         self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
         return self
 
@@ -83,10 +102,16 @@ class URLContentFetcher:
             return URLFetchResult(url=url, ok=False, error="unsupported or empty URL")
 
         async with self._semaphore:
+            cache_key = self._cache_key(url, goal)
+            cached = self._read_cache(cache_key)
+            if cached is not None:
+                return cached
+
             visit_error = ""
             if self.config.visit_endpoint:
                 visit_result = await self._fetch_with_visit_server(url, goal)
                 if visit_result.ok or not self.config.visit_fallback_to_direct_fetch:
+                    self._write_cache(cache_key, visit_result)
                     return visit_result
                 visit_error = visit_result.error
 
@@ -95,13 +120,59 @@ class URLContentFetcher:
                 try:
                     result = await self._fetch_once(url)
                     result.visit_error = visit_error
+                    self._write_cache(cache_key, result)
                     return result
                 except Exception as exc:
                     last_error = exc
                     if attempt >= self.config.max_retries:
                         break
                     await asyncio.sleep(self.config.retry_sleep_s * attempt)
-            return URLFetchResult(url=url, ok=False, error=format_exception(last_error), visit_error=visit_error)
+            result = URLFetchResult(url=url, ok=False, error=format_exception(last_error), visit_error=visit_error)
+            self._write_cache(cache_key, result)
+            return result
+
+    def _cache_key(self, url: str, goal: str) -> str:
+        if not self.config.cache_dir:
+            return ""
+        endpoint = normalize_visit_endpoint(self.config.visit_endpoint)
+        if endpoint:
+            raw_key = f"visit:{endpoint}:{url}:{goal}"
+        else:
+            raw_key = f"direct:{url}"
+        return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+    def _cache_path(self, cache_key: str) -> Path | None:
+        if not cache_key or not self.config.cache_dir:
+            return None
+        return Path(self.config.cache_dir) / f"{cache_key}.json"
+
+    def _read_cache(self, cache_key: str) -> URLFetchResult | None:
+        path = self._cache_path(cache_key)
+        if path is None or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            result = URLFetchResult(**{k: v for k, v in data.items() if k in URL_FETCH_RESULT_FIELDS})
+            result.cached = True
+            return result
+        except Exception:
+            return None
+
+    def _write_cache(self, cache_key: str, result: URLFetchResult) -> None:
+        if not result.ok and not self.config.cache_errors:
+            return
+        path = self._cache_path(cache_key)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = asdict(result)
+            payload["cached"] = False
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp_path.replace(path)
+        except Exception:
+            return
 
     async def _fetch_with_visit_server(self, url: str, goal: str) -> URLFetchResult:
         assert self._session is not None
@@ -137,15 +208,30 @@ class URLContentFetcher:
                         data = {"content": raw_text}
                     content = data.get("content", "") if isinstance(data, dict) else ""
                     content = clean_text(str(content))
+                    extraction_method = ""
+                    final_url = url
+                    status = response.status
+                    content_type = response.headers.get("content-type", "")
+                    raw_text_chars = len(content)
+                    server_error = ""
+                    if isinstance(data, dict):
+                        extraction_method = str(data.get("extraction_method", "") or data.get("method", ""))
+                        final_url = str(data.get("final_url", "") or url)
+                        status = safe_int(data.get("status"), response.status)
+                        content_type = str(data.get("content_type") or content_type)
+                        raw_text_chars = safe_int(data.get("raw_text_chars"), len(content))
+                        server_error = str(data.get("error") or "")
                     return URLFetchResult(
                         url=url,
                         ok=bool(content),
-                        status=response.status,
-                        content_type=response.headers.get("content-type", ""),
-                        final_url=url,
+                        status=status,
+                        content_type=content_type,
+                        final_url=final_url,
                         text=content[: self.config.max_extracted_chars],
-                        error="" if content else "visit server returned empty content",
+                        error="" if content else (server_error or "visit server returned empty content"),
                         source="visit_server",
+                        extraction_method=extraction_method or "visit_server",
+                        raw_text_chars=raw_text_chars,
                     )
             except Exception as exc:
                 last_error = exc
@@ -171,7 +257,7 @@ class URLContentFetcher:
                     truncated_bytes=truncated,
                 )
 
-            text = extract_response_text(
+            text, extraction_method, raw_text_chars = extract_response_text(
                 body=body,
                 content_type=content_type,
                 url=final_url,
@@ -188,6 +274,8 @@ class URLContentFetcher:
                 error="" if text.strip() else "no extractable text",
                 source="direct",
                 truncated_bytes=truncated,
+                extraction_method=extraction_method,
+                raw_text_chars=raw_text_chars,
             )
 
 
@@ -229,18 +317,20 @@ def extract_response_text(
     url: str,
     encoding: str | None,
     max_chars: int,
-) -> str:
+) -> tuple[str, str, int]:
     lowered_type = content_type.lower()
     lowered_url = url.lower().split("?", 1)[0]
     if "pdf" in lowered_type or lowered_url.endswith(".pdf"):
-        text = extract_text_from_pdf(body)
+        text, method = extract_text_from_pdf(body)
     else:
         decoded = decode_body(body, encoding)
         if "html" in lowered_type or looks_like_html(decoded):
-            text = extract_text_from_html(decoded)
+            text, method = extract_text_from_html(decoded)
         else:
             text = clean_text(decoded)
-    return text[:max_chars]
+            method = "plain_text"
+    raw_text_chars = len(text)
+    return text[:max_chars], method, raw_text_chars
 
 
 def decode_body(body: bytes, encoding: str | None) -> str:
@@ -260,11 +350,35 @@ def looks_like_html(text: str) -> bool:
     return "<html" in sample or "<body" in sample or "<p" in sample or "<div" in sample
 
 
-def extract_text_from_pdf(body: bytes) -> str:
+def extract_text_from_pdf(body: bytes) -> tuple[str, str]:
+    text = extract_text_from_pdf_with_pymupdf(body)
+    if text:
+        return text, "pdf_pymupdf"
     text = extract_text_from_pdf_with_pypdf(body)
     if text:
-        return text
-    return extract_text_from_pdf_with_pdfminer(body)
+        return text, "pdf_pypdf"
+    text = extract_text_from_pdf_with_pdfminer(body)
+    if text:
+        return text, "pdf_pdfminer"
+    return "", "pdf_none"
+
+
+def extract_text_from_pdf_with_pymupdf(body: bytes) -> str:
+    try:
+        import fitz
+    except Exception:
+        return ""
+
+    try:
+        texts: list[str] = []
+        with fitz.open(stream=body, filetype="pdf") as doc:
+            for page in doc[:30]:
+                page_text = page.get_text() or ""
+                if page_text.strip():
+                    texts.append(page_text)
+        return clean_text("\n".join(texts))
+    except Exception:
+        return ""
 
 
 def extract_text_from_pdf_with_pypdf(body: bytes) -> str:
@@ -304,6 +418,13 @@ def format_exception(exc: Exception | None) -> str:
     if message:
         return message
     return exc.__class__.__name__
+
+
+def safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -367,14 +488,153 @@ class _HTMLTextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def extract_text_from_html(markup: str) -> str:
+def extract_text_from_html(markup: str) -> tuple[str, str]:
+    text = extract_text_from_html_with_trafilatura(markup)
+    if text:
+        return text, "html_trafilatura"
+    text = extract_text_from_html_with_bs4(markup)
+    if text:
+        return text, "html_bs4"
     parser = _HTMLTextExtractor()
     try:
         parser.feed(markup)
         parser.close()
-        return clean_text("".join(parser.parts))
+        return clean_text("".join(parser.parts)), "html_parser"
     except Exception:
-        return clean_text(re.sub(r"<[^>]+>", " ", markup))
+        return clean_text(re.sub(r"<[^>]+>", " ", markup)), "html_regex"
+
+
+def extract_text_from_html_with_trafilatura(markup: str) -> str:
+    try:
+        import trafilatura
+    except Exception:
+        return ""
+
+    try:
+        extracted = trafilatura.extract(
+            markup,
+            include_comments=False,
+            include_tables=True,
+            no_fallback=False,
+            output_format="txt",
+        )
+        return clean_text(extracted or "")
+    except Exception:
+        return ""
+
+
+def extract_text_from_html_with_bs4(markup: str) -> str:
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return ""
+
+    try:
+        soup = BeautifulSoup(markup, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg", "canvas", "form", "iframe"]):
+            tag.decompose()
+        candidates = soup.find_all(["article", "main"])
+        if not candidates:
+            candidates = soup.find_all(["p", "h1", "h2", "h3", "li", "td", "th"])
+        parts: list[str] = []
+        for item in candidates:
+            text = item.get_text("\n", strip=True)
+            if text:
+                parts.append(text)
+        return clean_text("\n".join(parts))
+    except Exception:
+        return ""
+
+
+def select_relevant_excerpt(text: str, goal: str, max_chars: int) -> str:
+    """Return a goal-focused window instead of blindly taking the first chars."""
+    text = clean_text(text)
+    if not text or len(text) <= max_chars:
+        return text
+
+    chunks = split_text_chunks(text)
+    if not chunks:
+        return text[:max_chars]
+
+    goal_tokens = tokenize_for_relevance(goal)
+    if not goal_tokens:
+        return text[:max_chars]
+
+    scored: list[tuple[float, int, str]] = []
+    for idx, chunk in enumerate(chunks):
+        chunk_tokens = tokenize_for_relevance(chunk)
+        overlap = len(goal_tokens & chunk_tokens)
+        numeric_bonus = min(6, len(re.findall(r"\d+(?:[.,]\d+)?%?|20\d{2}|19\d{2}", chunk)))
+        title_bonus = 1.5 if idx <= 2 else 0.0
+        score = overlap + numeric_bonus * 0.35 + title_bonus
+        scored.append((score, idx, chunk))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected_indices: set[int] = set()
+    candidate_indices: list[int] = []
+    for score, idx, _chunk in scored[: max(4, min(12, len(scored)))]:
+        if score <= 0 and selected_indices:
+            continue
+        for candidate in (idx, idx - 1, idx + 1):
+            if candidate < 0 or candidate >= len(chunks) or candidate in selected_indices:
+                continue
+            selected_indices.add(candidate)
+            candidate_indices.append(candidate)
+    ordered = [chunks[idx] for idx in candidate_indices]
+    output: list[str] = []
+    total = 0
+    for chunk in ordered:
+        addition = len(chunk) + 2
+        if total + addition > max_chars:
+            remaining = max_chars - total
+            if remaining > 200:
+                output.append(chunk[:remaining])
+            break
+        output.append(chunk)
+        total += addition
+
+    if not output and ordered:
+        return ordered[0][:max_chars]
+    if not output:
+        return text[:max_chars]
+    return "\n\n".join(output)
+
+
+def split_text_chunks(text: str) -> list[str]:
+    paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+    chunks: list[str] = []
+    buffer: list[str] = []
+    buffer_len = 0
+    for paragraph in paragraphs:
+        if len(paragraph) >= 120:
+            if buffer:
+                chunks.append(" ".join(buffer))
+                buffer = []
+                buffer_len = 0
+            chunks.append(paragraph)
+            continue
+        buffer.append(paragraph)
+        buffer_len += len(paragraph)
+        if buffer_len >= 240:
+            chunks.append(" ".join(buffer))
+            buffer = []
+            buffer_len = 0
+    if buffer:
+        chunks.append(" ".join(buffer))
+    return chunks
+
+
+def tokenize_for_relevance(text: str) -> set[str]:
+    lowered = text.lower()
+    tokens = set(re.findall(r"[a-z0-9][a-z0-9_\-]{1,}|[\u4e00-\u9fff]{2,}", lowered))
+    chinese_runs = re.findall(r"[\u4e00-\u9fff]{2,}", lowered)
+    for run in chinese_runs:
+        for size in (2, 3, 4):
+            if len(run) < size:
+                continue
+            for idx in range(0, len(run) - size + 1):
+                tokens.add(run[idx : idx + size])
+    return {token for token in tokens if len(token) >= 2}
 
 
 def clean_text(text: str) -> str:

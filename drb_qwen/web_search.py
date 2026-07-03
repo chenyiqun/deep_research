@@ -33,6 +33,8 @@ class SearchResult:
     refer: str = ""
     publish_date: str = ""
     search_query: str = ""
+    source_quality: str = ""
+    extraction_method: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)

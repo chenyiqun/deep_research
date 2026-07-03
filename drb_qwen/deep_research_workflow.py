@@ -7,7 +7,7 @@ from typing import Any
 
 from .async_llm_client import AsyncChatClient
 from .json_utils import extract_json
-from .url_fetcher import URLContentFetcher, URLFetchResult
+from .url_fetcher import URLContentFetcher, URLFetchResult, select_relevant_excerpt
 from .web_search import SearchResult, WebSearchClient
 
 
@@ -199,6 +199,8 @@ class AsyncDeepResearchWorkflow:
                     refer=result.refer,
                     publish_date=result.publish_date,
                     search_query=result.search_query,
+                    source_quality=source_quality_from_fetch(fetch_result, used_full_content),
+                    extraction_method=fetch_result.extraction_method,
                 )
             )
             trace_item = fetch_result.to_dict()
@@ -209,6 +211,7 @@ class AsyncDeepResearchWorkflow:
                     "snippet_chars": len(result.content),
                     "reader_content_chars": len(content),
                     "used_full_content": used_full_content,
+                    "source_quality": source_quality_from_fetch(fetch_result, used_full_content),
                 }
             )
             fetch_traces.append(trace_item)
@@ -441,9 +444,16 @@ title: {result.title}
 url: {result.link}
 media: {result.media}
 publish_date: {result.publish_date}
+source_quality: {result.source_quality or "search_snippet"}
+extraction_method: {result.extraction_method or "snippet"}
 content:
 {content}
 </source>
+
+置信度规则：
+- source_quality 以 full_text 开头时，来源正文可作为主要证据。
+- source_quality=snippet_only 或 fetch_failed 时，默认不要给 high confidence，除非 snippet 本身来自非常权威来源且事实非常直接。
+- 不要改写 URL；source_url 必须原样复制。
 
 只输出 JSON:
 {{
@@ -451,6 +461,8 @@ content:
   "source_url": "{json_escape(result.link)}",
   "publish_date": "{json_escape(result.publish_date)}",
   "search_query": "{json_escape(result.search_query)}",
+  "source_quality": "{json_escape(result.source_quality)}",
+  "extraction_method": "{json_escape(result.extraction_method)}",
   "relevance": 0.0,
   "core_information": [
     {{
@@ -481,9 +493,16 @@ title: {result.title}
 url: {result.link}
 media: {result.media}
 publish_date: {result.publish_date}
+source_quality: {result.source_quality or "search_snippet"}
+extraction_method: {result.extraction_method or "snippet"}
 content:
 {content}
 </source>
+
+Confidence rules:
+- When source_quality starts with full_text, the page text can be used as primary evidence.
+- When source_quality=snippet_only or fetch_failed, do not assign high confidence by default unless the snippet is directly from an authoritative source.
+- Do not rewrite URLs; source_url must be copied exactly.
 
 Return JSON only:
 {{
@@ -491,6 +510,8 @@ Return JSON only:
   "source_url": "{json_escape(result.link)}",
   "publish_date": "{json_escape(result.publish_date)}",
   "search_query": "{json_escape(result.search_query)}",
+  "source_quality": "{json_escape(result.source_quality)}",
+  "extraction_method": "{json_escape(result.extraction_method)}",
   "relevance": 0.0,
   "core_information": [
     {{
@@ -517,6 +538,8 @@ def build_query_summarizer_prompt(
         return f"""
 请把同一个 search query 下多个 reader 的结果综合成一份 query-level core information。
 保留 URL 归因，区分事实、推断、不确定性和冲突。
+优先使用 source_quality=full_text 的 reader notes；snippet_only/fetch_failed 只能作为弱证据或检索线索。
+low_value_sources 只能填 reader_notes 中已有的 source_url 原文，不要生成或改写 URL。
 
 <original_question>
 {task["prompt"]}
@@ -552,6 +575,8 @@ def build_query_summarizer_prompt(
     return f"""
 Synthesize multiple reader notes for one search query into query-level core information.
 Preserve URL attribution and separate facts, inference, uncertainty, and conflicts.
+Prefer reader notes with source_quality=full_text. Treat snippet_only/fetch_failed notes as weak evidence or search leads.
+low_value_sources must only contain exact source_url values copied from reader_notes; do not generate or rewrite URLs.
 
 <original_question>
 {task["prompt"]}
@@ -604,6 +629,7 @@ def build_state_updater_prompt(
 2. 只输出新增信息、对旧信息的修正、被解决的问题、仍存在的冲突、下一轮搜索提示。
 3. evidence 必须保留 source_url。
 4. 如果当前轮次发现之前信息可能错误，放入 corrected_findings。
+5. snippet_only/fetch_failed 证据默认不能升级为 high confidence；优先保留 full_text 证据。
 
 <original_question>
 {task["prompt"]}
@@ -655,6 +681,7 @@ Rules:
 2. Output only new information, corrections, resolved questions, unresolved conflicts, and next-search hints.
 3. Evidence must preserve source_url.
 4. If this round shows previous information may be wrong, put it in corrected_findings.
+5. Do not upgrade snippet_only/fetch_failed evidence to high confidence by default; prefer full_text evidence.
 
 <original_question>
 {task["prompt"]}
@@ -842,27 +869,59 @@ def build_reader_source_content(
     fetched_text = fetch_result.text.strip()
     used_full_content = fetch_result.ok and len(fetched_text) >= config.min_fetched_content_chars
     if used_full_content:
-        full_text = truncate(fetched_text, config.source_content_max_chars)
+        full_text = select_relevant_excerpt(
+            fetched_text,
+            goal=f"{result.search_query}\n{result.title}\n{snippet}",
+            max_chars=config.source_content_max_chars,
+        )
+        method = fetch_result.extraction_method or fetch_result.source or "direct"
+        source_note = (
+            "Source acquisition: full_text "
+            f"(source={fetch_result.source}, method={method}, "
+            f"raw_text_chars={fetch_result.raw_text_chars or len(fetched_text)}, "
+            f"cached={fetch_result.cached})."
+        )
         if snippet:
             return (
+                f"{source_note}\n"
                 "Fetched URL text, preferred evidence:\n"
                 f"{full_text}\n\n"
                 "Original search snippet, use only as secondary context:\n"
                 f"{snippet}",
                 True,
             )
-        return f"Fetched URL text, preferred evidence:\n{full_text}", True
+        return f"{source_note}\nFetched URL text, preferred evidence:\n{full_text}", True
 
     fallback_parts = []
     if snippet:
-        fallback_parts.append("Search snippet, full URL text unavailable:\n" + snippet)
+        fallback_parts.append(
+            "Source acquisition: snippet_only. Full URL text is unavailable; treat this as weak evidence.\n"
+            "Search snippet:\n"
+            + snippet
+        )
     if fetch_result.error:
         fallback_parts.append(f"URL fetch note: {fetch_result.error}")
+    if fetch_result.visit_error:
+        fallback_parts.append(f"URL visit note: {fetch_result.visit_error}")
     if fetch_result.status is not None:
         fallback_parts.append(f"URL fetch HTTP status: {fetch_result.status}")
+    if fetch_result.extraction_method:
+        fallback_parts.append(f"URL extraction method: {fetch_result.extraction_method}")
     if not fallback_parts:
         fallback_parts.append("No source text was available from search snippet or URL fetch.")
     return "\n\n".join(fallback_parts), False
+
+
+def source_quality_from_fetch(fetch_result: URLFetchResult, used_full_content: bool) -> str:
+    if used_full_content:
+        if fetch_result.source == "visit_server":
+            return "full_text_visit"
+        if "pdf" in (fetch_result.extraction_method or ""):
+            return "full_text_pdf"
+        return "full_text"
+    if fetch_result.error or fetch_result.visit_error:
+        return "fetch_failed"
+    return "snippet_only"
 
 
 def build_url_visit_goal(task: dict[str, Any], result: SearchResult) -> str:

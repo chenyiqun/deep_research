@@ -11,5 +11,6 @@ __all__ = [
     "scoring",
     "url_fetcher",
     "vllm_chat",
+    "visit_server",
     "web_search",
 ]

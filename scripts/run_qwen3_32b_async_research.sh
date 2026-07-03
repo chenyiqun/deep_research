@@ -21,12 +21,16 @@ MAX_CONCURRENT_URL_FETCHES="${MAX_CONCURRENT_URL_FETCHES:-16}"
 URL_FETCH_TIMEOUT_S="${URL_FETCH_TIMEOUT_S:-30}"
 URL_FETCH_MAX_RETRIES="${URL_FETCH_MAX_RETRIES:-2}"
 URL_FETCH_MAX_BYTES="${URL_FETCH_MAX_BYTES:-2000000}"
+URL_FETCH_MAX_EXTRACTED_CHARS="${URL_FETCH_MAX_EXTRACTED_CHARS:-50000}"
+URL_FETCH_CACHE_DIR="${URL_FETCH_CACHE_DIR:-${OUT_DIR}/url_cache}"
+URL_FETCH_CACHE_ERRORS="${URL_FETCH_CACHE_ERRORS:-0}"
 MIN_FETCHED_CONTENT_CHARS="${MIN_FETCHED_CONTENT_CHARS:-500}"
 MAX_ROUNDS="${MAX_ROUNDS:-3}"
 MAX_SEARCH_QUERIES_PER_ROUND="${MAX_SEARCH_QUERIES_PER_ROUND:-3}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
 SEARCH_COUNT="${SEARCH_COUNT:-15}"
 REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}"
+SOURCE_CONTENT_MAX_CHARS="${SOURCE_CONTENT_MAX_CHARS:-12000}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-4096}"
 JUDGE_CONTEXT_RETRY_ATTEMPTS="${JUDGE_CONTEXT_RETRY_ATTEMPTS:-2}"
 JUDGE_CONTEXT_SAFETY_TOKENS="${JUDGE_CONTEXT_SAFETY_TOKENS:-256}"
@@ -64,6 +68,9 @@ echo "URL visit endpoint: ${URL_VISIT_ENDPOINT}"
 echo "Max concurrent URL fetches: ${MAX_CONCURRENT_URL_FETCHES}"
 echo "URL fetch timeout seconds: ${URL_FETCH_TIMEOUT_S}"
 echo "URL fetch max bytes: ${URL_FETCH_MAX_BYTES}"
+echo "URL fetch max extracted chars: ${URL_FETCH_MAX_EXTRACTED_CHARS}"
+echo "URL fetch cache dir: ${URL_FETCH_CACHE_DIR}"
+echo "URL fetch cache errors: ${URL_FETCH_CACHE_ERRORS}"
 echo "Min fetched content chars: ${MIN_FETCHED_CONTENT_CHARS}"
 echo "Max concurrent readers: ${MAX_CONCURRENT_READERS}"
 echo "Max concurrent searches: ${MAX_CONCURRENT_SEARCHES}"
@@ -72,6 +79,7 @@ echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
 echo "Search top-k: ${SEARCH_TOP_K}"
 echo "Search count: ${SEARCH_COUNT}"
 echo "Judge max tokens: ${JUDGE_MAX_TOKENS}"
+echo "Source content max chars: ${SOURCE_CONTENT_MAX_CHARS}"
 
 echo "Waiting for vLLM server: ${VLLM_BASE_URL}/models"
 VLLM_READY=0
@@ -106,6 +114,11 @@ case "${URL_VISIT_FALLBACK_ENABLED}" in
     URL_FETCH_ARGS+=(--disable-url-visit-fallback)
     ;;
 esac
+case "${URL_FETCH_CACHE_ERRORS}" in
+  1|true|True|TRUE|yes|Yes|YES)
+    URL_FETCH_ARGS+=(--url-fetch-cache-errors)
+    ;;
+esac
 
 PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --query-file "${DATA_DIR}/query.jsonl" \
@@ -126,10 +139,13 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --url-fetch-timeout-s "${URL_FETCH_TIMEOUT_S}" \
   --url-fetch-max-retries "${URL_FETCH_MAX_RETRIES}" \
   --url-fetch-max-bytes "${URL_FETCH_MAX_BYTES}" \
+  --url-fetch-max-extracted-chars "${URL_FETCH_MAX_EXTRACTED_CHARS}" \
+  --url-fetch-cache-dir "${URL_FETCH_CACHE_DIR}" \
   --min-fetched-content-chars "${MIN_FETCHED_CONTENT_CHARS}" \
   --max-concurrent-readers "${MAX_CONCURRENT_READERS}" \
   --max-rounds "${MAX_ROUNDS}" \
   --max-search-queries-per-round "${MAX_SEARCH_QUERIES_PER_ROUND}" \
+  --source-content-max-chars "${SOURCE_CONTENT_MAX_CHARS}" \
   --report-max-tokens "${REPORT_MAX_TOKENS}" \
   "${URL_FETCH_ARGS[@]}"
 

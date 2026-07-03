@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from drb_qwen.url_fetcher import extract_text_from_html, normalize_visit_endpoint, should_try_fetch_url
+from drb_qwen.url_fetcher import (
+    extract_text_from_html,
+    normalize_visit_endpoint,
+    select_relevant_excerpt,
+    should_try_fetch_url,
+)
 
 
 def main() -> None:
@@ -17,11 +22,21 @@ def main() -> None:
       </body>
     </html>
     """
-    text = extract_text_from_html(html)
+    text, method = extract_text_from_html(html)
     assert "Research title" in text
     assert "First paragraph with useful evidence." in text
     assert "Second paragraph with 2026 data." in text
     assert "window.secret" not in text
+    assert method.startswith("html_")
+    long_text = "\n".join(
+        [
+            "opening unrelated paragraph " * 30,
+            "中国保险公司 信用评级 分红 ROE 这些是关键数据。",
+            "closing unrelated paragraph " * 30,
+        ]
+    )
+    excerpt = select_relevant_excerpt(long_text, "保险公司 信用评级 ROE", max_chars=120)
+    assert "信用评级" in excerpt
     assert should_try_fetch_url("https://example.com/a")
     assert not should_try_fetch_url("ftp://example.com/a")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"

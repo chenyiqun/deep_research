@@ -6,3 +6,8 @@ requests
 aiohttp
 pypdf
 pdfminer.six
+PyMuPDF
+beautifulsoup4
+trafilatura
+fastapi
+uvicorn

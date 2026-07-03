@@ -108,12 +108,24 @@ def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
 
     reader_chars = [safe_int(item.get("reader_content_chars")) for item in fetches]
     reader_chars = [value for value in reader_chars if value >= 0]
+    raw_text_chars = [safe_int(item.get("raw_text_chars")) for item in fetches]
+    raw_text_chars = [value for value in raw_text_chars if value >= 0]
     errors = [
         normalize_log_value(item.get("error"))
         for item in fetches
         if normalize_log_value(item.get("error"))
     ]
     error_counts = Counter(errors)
+    quality_counts = Counter(
+        normalize_log_value(item.get("source_quality"))
+        for item in fetches
+        if normalize_log_value(item.get("source_quality"))
+    )
+    method_counts = Counter(
+        normalize_log_value(item.get("extraction_method"))
+        for item in fetches
+        if normalize_log_value(item.get("extraction_method"))
+    )
     state = result.get("state", {})
     if not isinstance(state, dict):
         state = {}
@@ -124,12 +136,21 @@ def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
         "url_fetches": len(fetches),
         "fetch_ok": sum(1 for item in fetches if item.get("ok") is True),
         "full_text_sources": sum(1 for item in fetches if item.get("used_full_content") is True),
+        "fetch_cached": sum(1 for item in fetches if item.get("cached") is True),
         "reader_notes": reader_notes,
         "reader_chars_avg": int(sum(reader_chars) / len(reader_chars)) if reader_chars else 0,
         "reader_chars_max": max(reader_chars) if reader_chars else 0,
+        "raw_text_chars_avg": int(sum(raw_text_chars) / len(raw_text_chars)) if raw_text_chars else 0,
+        "raw_text_chars_max": max(raw_text_chars) if raw_text_chars else 0,
         "fetch_errors": sum(error_counts.values()),
         "top_fetch_errors": ",".join(
             f"{name}:{count}" for name, count in error_counts.most_common(3)
+        ),
+        "source_quality": ",".join(
+            f"{name}:{count}" for name, count in quality_counts.most_common(4)
+        ),
+        "extraction_methods": ",".join(
+            f"{name}:{count}" for name, count in method_counts.most_common(4)
         ),
         "article_chars": len(str(result.get("article", ""))),
         "state_findings": len(state.get("findings", [])) if isinstance(state.get("findings"), list) else 0,
@@ -145,6 +166,8 @@ def format_research_task_log(
 ) -> str:
     trace_text = str(trace_path) if trace_path is not None else "-"
     error_text = summary.get("top_fetch_errors") or "-"
+    quality_text = summary.get("source_quality") or "-"
+    method_text = summary.get("extraction_methods") or "-"
     return (
         f"[report task={task_id}] ok "
         f"article_chars={summary['article_chars']} "
@@ -154,11 +177,16 @@ def format_research_task_log(
         f"url_fetches={summary['url_fetches']} "
         f"fetch_ok={summary['fetch_ok']} "
         f"full_text={summary['full_text_sources']} "
+        f"cached={summary['fetch_cached']} "
         f"reader_notes={summary['reader_notes']} "
         f"reader_chars_avg={summary['reader_chars_avg']} "
         f"reader_chars_max={summary['reader_chars_max']} "
+        f"raw_text_avg={summary['raw_text_chars_avg']} "
+        f"raw_text_max={summary['raw_text_chars_max']} "
         f"fetch_errors={summary['fetch_errors']} "
         f"top_fetch_errors={error_text} "
+        f"source_quality={quality_text} "
+        f"methods={method_text} "
         f"state_findings={summary['state_findings']} "
         f"state_evidence={summary['state_evidence']} "
         f"trace={trace_text}"
@@ -243,6 +271,9 @@ async def run_async(args: argparse.Namespace) -> None:
         max_concurrent_requests=args.max_concurrent_url_fetches,
         max_retries=args.url_fetch_max_retries,
         max_bytes=args.url_fetch_max_bytes,
+        max_extracted_chars=args.url_fetch_max_extracted_chars,
+        cache_dir=args.url_fetch_cache_dir,
+        cache_errors=args.url_fetch_cache_errors,
     )
 
     print(f"Async vLLM base URL: {args.llm_base_url}")
@@ -263,6 +294,9 @@ async def run_async(args: argparse.Namespace) -> None:
         print(f"Max concurrent URL fetches: {args.max_concurrent_url_fetches}")
         print(f"URL fetch timeout: {args.url_fetch_timeout_s}s")
         print(f"URL fetch max bytes: {args.url_fetch_max_bytes}")
+        print(f"URL fetch max extracted chars: {args.url_fetch_max_extracted_chars}")
+        print(f"URL fetch cache dir: {args.url_fetch_cache_dir or '<disabled>'}")
+        print(f"URL fetch cache errors: {args.url_fetch_cache_errors}")
         print(f"Min fetched content chars: {args.min_fetched_content_chars}")
         print(f"Source content max chars for reader: {args.source_content_max_chars}")
     print(f"Max concurrent readers: {args.max_concurrent_readers}")
@@ -340,6 +374,9 @@ def main() -> None:
     parser.add_argument("--url-fetch-timeout-s", type=int, default=30)
     parser.add_argument("--url-fetch-max-retries", type=int, default=2)
     parser.add_argument("--url-fetch-max-bytes", type=int, default=2_000_000)
+    parser.add_argument("--url-fetch-max-extracted-chars", type=int, default=50_000)
+    parser.add_argument("--url-fetch-cache-dir", default="")
+    parser.add_argument("--url-fetch-cache-errors", action="store_true")
     parser.add_argument("--min-fetched-content-chars", type=int, default=500)
 
     parser.add_argument("--max-rounds", type=int, default=3)
