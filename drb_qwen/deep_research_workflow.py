@@ -7,6 +7,7 @@ from typing import Any
 
 from .async_llm_client import AsyncChatClient
 from .json_utils import extract_json
+from .url_fetcher import URLContentFetcher, URLFetchResult
 from .web_search import SearchResult, WebSearchClient
 
 
@@ -39,6 +40,8 @@ class DeepResearchConfig:
     max_search_queries_per_round: int = 3
     search_top_k: int = 5
     search_count: int = 15
+    fetch_full_content: bool = True
+    min_fetched_content_chars: int = 500
     max_concurrent_readers: int = 12
     planner_max_tokens: int = 2048
     reader_max_tokens: int = 2048
@@ -59,10 +62,12 @@ class AsyncDeepResearchWorkflow:
         self,
         llm: AsyncChatClient,
         search_client: WebSearchClient,
+        content_fetcher: URLContentFetcher | None = None,
         config: DeepResearchConfig | None = None,
     ) -> None:
         self.llm = llm
         self.search_client = search_client
+        self.content_fetcher = content_fetcher
         self.config = config or DeepResearchConfig()
         self._reader_semaphore = asyncio.Semaphore(self.config.max_concurrent_readers)
 
@@ -83,7 +88,8 @@ class AsyncDeepResearchWorkflow:
                 break
 
             search_results_by_query = await self._search_all(search_queries)
-            reader_notes = await self._read_all_results(search_results_by_query, task)
+            reader_sources, source_fetches = await self._prepare_reader_sources(search_results_by_query)
+            reader_notes = await self._read_all_results(reader_sources, task)
             query_summaries = await self._summarize_by_query(task, search_results_by_query, reader_notes)
             state_patch = await self._update_state(task, state, query_summaries, round_idx)
             apply_state_patch(state, state_patch)
@@ -92,6 +98,10 @@ class AsyncDeepResearchWorkflow:
                     "round": round_idx,
                     "search_queries": search_queries,
                     "num_search_results": sum(len(v) for v in search_results_by_query.values()),
+                    "num_url_fetches": len(source_fetches),
+                    "num_full_text_sources": sum(
+                        1 for item in source_fetches if item.get("used_full_content") is True
+                    ),
                     "num_reader_notes": len(reader_notes),
                 }
             )
@@ -103,6 +113,7 @@ class AsyncDeepResearchWorkflow:
                         query: [result.to_dict() for result in results]
                         for query, results in search_results_by_query.items()
                     },
+                    "source_fetches": source_fetches,
                     "reader_notes": reader_notes,
                     "query_summaries": query_summaries,
                     "state_patch": state_patch,
@@ -154,28 +165,63 @@ class AsyncDeepResearchWorkflow:
                 output[pair[0]] = pair[1]
         return output
 
-    async def _read_all_results(
+    async def _prepare_reader_sources(
         self,
         search_results_by_query: dict[str, list[SearchResult]],
+    ) -> tuple[list[SearchResult], list[dict[str, Any]]]:
+        deduped = dedupe_search_results(search_results_by_query)
+        if not self.config.fetch_full_content or self.content_fetcher is None:
+            return deduped, []
+
+        fetches = await asyncio.gather(
+            *(self.content_fetcher.fetch(result.link) for result in deduped),
+            return_exceptions=True,
+        )
+        reader_sources: list[SearchResult] = []
+        fetch_traces: list[dict[str, Any]] = []
+        for result, fetch in zip(deduped, fetches):
+            if isinstance(fetch, Exception):
+                fetch_result = URLFetchResult(url=result.link, ok=False, error=str(fetch))
+            else:
+                fetch_result = fetch
+            content, used_full_content = build_reader_source_content(result, fetch_result, self.config)
+            reader_sources.append(
+                SearchResult(
+                    title=result.title,
+                    content=content,
+                    link=result.link,
+                    media=result.media,
+                    icon=result.icon,
+                    refer=result.refer,
+                    publish_date=result.publish_date,
+                    search_query=result.search_query,
+                )
+            )
+            trace_item = fetch_result.to_dict()
+            trace_item.update(
+                {
+                    "source_title": result.title,
+                    "search_query": result.search_query,
+                    "snippet_chars": len(result.content),
+                    "reader_content_chars": len(content),
+                    "used_full_content": used_full_content,
+                }
+            )
+            fetch_traces.append(trace_item)
+        return reader_sources, fetch_traces
+
+    async def _read_all_results(
+        self,
+        reader_sources: list[SearchResult],
         task: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        deduped: list[SearchResult] = []
-        seen: set[str] = set()
-        for results in search_results_by_query.values():
-            for result in results:
-                key = result.link or f"{result.title}:{result.content[:120]}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(result)
-
         async def read_one(result: SearchResult) -> dict[str, Any]:
             async with self._reader_semaphore:
                 return await self._read_result(task, result)
 
-        notes = await asyncio.gather(*(read_one(result) for result in deduped), return_exceptions=True)
+        notes = await asyncio.gather(*(read_one(result) for result in reader_sources), return_exceptions=True)
         output: list[dict[str, Any]] = []
-        for result, note in zip(deduped, notes):
+        for result, note in zip(reader_sources, notes):
             if isinstance(note, Exception):
                 output.append(
                     {
@@ -768,6 +814,51 @@ def sanitize_search_queries(values: Any, max_queries: int) -> list[str]:
         if len(queries) >= max_queries:
             break
     return queries
+
+
+def dedupe_search_results(search_results_by_query: dict[str, list[SearchResult]]) -> list[SearchResult]:
+    deduped: list[SearchResult] = []
+    seen: set[str] = set()
+    for results in search_results_by_query.values():
+        for result in results:
+            key = result.link or f"{result.title}:{result.content[:120]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(result)
+    return deduped
+
+
+def build_reader_source_content(
+    result: SearchResult,
+    fetch_result: URLFetchResult,
+    config: DeepResearchConfig,
+) -> tuple[str, bool]:
+    snippet = result.content.strip()
+    fetched_text = fetch_result.text.strip()
+    used_full_content = fetch_result.ok and len(fetched_text) >= config.min_fetched_content_chars
+    if used_full_content:
+        full_text = truncate(fetched_text, config.source_content_max_chars)
+        if snippet:
+            return (
+                "Fetched URL text, preferred evidence:\n"
+                f"{full_text}\n\n"
+                "Original search snippet, use only as secondary context:\n"
+                f"{snippet}",
+                True,
+            )
+        return f"Fetched URL text, preferred evidence:\n{full_text}", True
+
+    fallback_parts = []
+    if snippet:
+        fallback_parts.append("Search snippet, full URL text unavailable:\n" + snippet)
+    if fetch_result.error:
+        fallback_parts.append(f"URL fetch note: {fetch_result.error}")
+    if fetch_result.status is not None:
+        fallback_parts.append(f"URL fetch HTTP status: {fetch_result.status}")
+    if not fallback_parts:
+        fallback_parts.append("No source text was available from search snippet or URL fetch.")
+    return "\n\n".join(fallback_parts), False
 
 
 def ensure_string_list(value: Any) -> list[str]:

@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from drb_qwen.deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
+from drb_qwen.url_fetcher import URLFetchResult
 from drb_qwen.web_search import SearchResult
 
 
@@ -25,6 +26,7 @@ class FakeLLM:
                 }
             )
         if "抽取对原始研究问题有用" in user_prompt or "extract core information" in user_prompt:
+            assert "FULL ARTICLE TEXT" in user_prompt
             return json.dumps(
                 {
                     "relevance": 0.9,
@@ -95,11 +97,29 @@ class FakeSearchClient:
         ][:top_k]
 
 
+class FakeContentFetcher:
+    async def fetch(self, url: str) -> URLFetchResult:
+        return URLFetchResult(
+            url=url,
+            ok=True,
+            status=200,
+            content_type="text/html",
+            final_url=url,
+            text="FULL ARTICLE TEXT. AI companions can change perceived companionship needs.",
+        )
+
+
 async def main_async() -> None:
     workflow = AsyncDeepResearchWorkflow(
         llm=FakeLLM(),  # type: ignore[arg-type]
         search_client=FakeSearchClient(),  # type: ignore[arg-type]
-        config=DeepResearchConfig(max_rounds=1, max_search_queries_per_round=1, search_top_k=1),
+        content_fetcher=FakeContentFetcher(),  # type: ignore[arg-type]
+        config=DeepResearchConfig(
+            max_rounds=1,
+            max_search_queries_per_round=1,
+            search_top_k=1,
+            min_fetched_content_chars=10,
+        ),
     )
     task = {
         "id": 100,
@@ -112,6 +132,7 @@ async def main_async() -> None:
     assert result["state"]["findings"]
     assert result["state"]["evidence"]
     assert result["trace"][0]["search_results"]
+    assert result["trace"][0]["source_fetches"][0]["used_full_content"] is True
     print("smoke_test_async_workflow passed")
 
 

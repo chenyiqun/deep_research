@@ -9,6 +9,7 @@ __all__ = [
     "json_utils",
     "prompts",
     "scoring",
+    "url_fetcher",
     "vllm_chat",
     "web_search",
 ]

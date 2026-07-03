@@ -13,6 +13,12 @@ MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-4}"
 MAX_CONCURRENT_LLM_CALLS="${MAX_CONCURRENT_LLM_CALLS:-16}"
 MAX_CONCURRENT_SEARCHES="${MAX_CONCURRENT_SEARCHES:-8}"
 MAX_CONCURRENT_READERS="${MAX_CONCURRENT_READERS:-12}"
+URL_FETCH_ENABLED="${URL_FETCH_ENABLED:-1}"
+MAX_CONCURRENT_URL_FETCHES="${MAX_CONCURRENT_URL_FETCHES:-16}"
+URL_FETCH_TIMEOUT_S="${URL_FETCH_TIMEOUT_S:-30}"
+URL_FETCH_MAX_RETRIES="${URL_FETCH_MAX_RETRIES:-2}"
+URL_FETCH_MAX_BYTES="${URL_FETCH_MAX_BYTES:-2000000}"
+MIN_FETCHED_CONTENT_CHARS="${MIN_FETCHED_CONTENT_CHARS:-500}"
 MAX_ROUNDS="${MAX_ROUNDS:-3}"
 MAX_SEARCH_QUERIES_PER_ROUND="${MAX_SEARCH_QUERIES_PER_ROUND:-3}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
@@ -47,6 +53,10 @@ echo "vLLM model: ${VLLM_MODEL}"
 echo "Web search endpoint: ${WEB_SEARCH_ENDPOINT}"
 echo "Max concurrent tasks: ${MAX_CONCURRENT_TASKS}"
 echo "Max concurrent LLM calls: ${MAX_CONCURRENT_LLM_CALLS}"
+echo "URL fetch enabled: ${URL_FETCH_ENABLED}"
+echo "Max concurrent URL fetches: ${MAX_CONCURRENT_URL_FETCHES}"
+echo "URL fetch timeout seconds: ${URL_FETCH_TIMEOUT_S}"
+echo "URL fetch max bytes: ${URL_FETCH_MAX_BYTES}"
 echo "Max rounds: ${MAX_ROUNDS}"
 echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
 echo "Search top-k: ${SEARCH_TOP_K}"
@@ -69,6 +79,13 @@ echo "vLLM server is ready."
 
 REPORT_FILE="${OUT_DIR}/qwen3_32b_async_research_reports.jsonl"
 
+URL_FETCH_ARGS=()
+case "${URL_FETCH_ENABLED}" in
+  0|false|False|FALSE|no|No|NO)
+    URL_FETCH_ARGS+=(--disable-url-fetch)
+    ;;
+esac
+
 PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --query-file "${DATA_DIR}/query.jsonl" \
   --output-file "${REPORT_FILE}" \
@@ -84,10 +101,16 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --search-count "${SEARCH_COUNT}" \
   --search-top-k "${SEARCH_TOP_K}" \
   --max-concurrent-searches "${MAX_CONCURRENT_SEARCHES}" \
+  --max-concurrent-url-fetches "${MAX_CONCURRENT_URL_FETCHES}" \
+  --url-fetch-timeout-s "${URL_FETCH_TIMEOUT_S}" \
+  --url-fetch-max-retries "${URL_FETCH_MAX_RETRIES}" \
+  --url-fetch-max-bytes "${URL_FETCH_MAX_BYTES}" \
+  --min-fetched-content-chars "${MIN_FETCHED_CONTENT_CHARS}" \
   --max-concurrent-readers "${MAX_CONCURRENT_READERS}" \
   --max-rounds "${MAX_ROUNDS}" \
   --max-search-queries-per-round "${MAX_SEARCH_QUERIES_PER_ROUND}" \
-  --report-max-tokens "${REPORT_MAX_TOKENS}"
+  --report-max-tokens "${REPORT_MAX_TOKENS}" \
+  "${URL_FETCH_ARGS[@]}"
 
 PYTHONPATH="${REPO_DIR}" python -m drb_qwen.evaluate_race_async \
   --query-file "${DATA_DIR}/query.jsonl" \

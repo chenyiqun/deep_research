@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from tqdm import tqdm
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
 from .io_utils import existing_ids, filter_tasks, load_jsonl, prepare_output_file, write_jsonl, write_text
+from .url_fetcher import URLContentFetcher, URLFetchConfig
 from .web_search import PROD_WEB_SEARCH_ENDPOINT, WebSearchClient, WebSearchConfig
 
 
@@ -114,6 +116,8 @@ async def run_async(args: argparse.Namespace) -> None:
         max_search_queries_per_round=args.max_search_queries_per_round,
         search_top_k=args.search_top_k,
         search_count=args.search_count,
+        fetch_full_content=not args.disable_url_fetch,
+        min_fetched_content_chars=args.min_fetched_content_chars,
         max_concurrent_readers=args.max_concurrent_readers,
         planner_max_tokens=args.planner_max_tokens,
         reader_max_tokens=args.reader_max_tokens,
@@ -124,6 +128,12 @@ async def run_async(args: argparse.Namespace) -> None:
         state_prompt_max_chars=args.state_prompt_max_chars,
         evidence_prompt_max_chars=args.evidence_prompt_max_chars,
     )
+    url_fetch_config = URLFetchConfig(
+        timeout_s=args.url_fetch_timeout_s,
+        max_concurrent_requests=args.max_concurrent_url_fetches,
+        max_retries=args.url_fetch_max_retries,
+        max_bytes=args.url_fetch_max_bytes,
+    )
 
     print(f"Async vLLM base URL: {args.llm_base_url}")
     print(f"Async vLLM model: {args.llm_model}")
@@ -133,12 +143,27 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Max concurrent LLM calls: {args.max_concurrent_llm_calls}")
     print(f"Max rounds: {args.max_rounds}")
     print(f"Search top-k: {args.search_top_k}")
+    print(f"URL fetch enabled: {not args.disable_url_fetch}")
+    if not args.disable_url_fetch:
+        print(f"Max concurrent URL fetches: {args.max_concurrent_url_fetches}")
+        print(f"URL fetch timeout: {args.url_fetch_timeout_s}s")
+        print(f"URL fetch max bytes: {args.url_fetch_max_bytes}")
 
     task_semaphore = asyncio.Semaphore(args.max_concurrent_tasks)
     output_lock = asyncio.Lock()
 
-    async with AsyncChatClient(llm_config) as llm, WebSearchClient(search_config) as search_client:
-        workflow = AsyncDeepResearchWorkflow(llm=llm, search_client=search_client, config=workflow_config)
+    async with AsyncExitStack() as stack:
+        llm = await stack.enter_async_context(AsyncChatClient(llm_config))
+        search_client = await stack.enter_async_context(WebSearchClient(search_config))
+        content_fetcher = None
+        if not args.disable_url_fetch:
+            content_fetcher = await stack.enter_async_context(URLContentFetcher(url_fetch_config))
+        workflow = AsyncDeepResearchWorkflow(
+            llm=llm,
+            search_client=search_client,
+            content_fetcher=content_fetcher,
+            config=workflow_config,
+        )
         progress = tqdm(total=len(tasks), desc="Async deep research")
 
         async def guarded_run(task: dict[str, Any]) -> None:
@@ -188,6 +213,12 @@ def main() -> None:
     parser.add_argument("--search-content-size", default="high")
     parser.add_argument("--search-max-retries", type=int, default=3)
     parser.add_argument("--max-concurrent-searches", type=int, default=8)
+    parser.add_argument("--disable-url-fetch", action="store_true")
+    parser.add_argument("--max-concurrent-url-fetches", type=int, default=16)
+    parser.add_argument("--url-fetch-timeout-s", type=int, default=30)
+    parser.add_argument("--url-fetch-max-retries", type=int, default=2)
+    parser.add_argument("--url-fetch-max-bytes", type=int, default=2_000_000)
+    parser.add_argument("--min-fetched-content-chars", type=int, default=500)
 
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument("--min-rounds", type=int, default=1)
