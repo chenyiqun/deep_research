@@ -44,6 +44,7 @@ async def judge_task(
             llm=llm,
             judge_prompt=judge_prompt or "",
             args=args,
+            task_id=int(task["id"]),
         )
     except Exception as exc:
         return {
@@ -72,10 +73,11 @@ async def call_judge_with_context_retry(
     llm: AsyncChatClient,
     judge_prompt: str,
     args: argparse.Namespace,
+    task_id: int,
 ) -> str:
     max_tokens = args.max_tokens
     last_error: Exception | None = None
-    for _ in range(args.context_retry_attempts + 1):
+    for attempt in range(args.context_retry_attempts + 1):
         try:
             return await llm.chat(
                 judge_prompt,
@@ -93,6 +95,11 @@ async def call_judge_with_context_retry(
             )
             if retry_tokens is None:
                 raise
+            print(
+                f"[judge task={task_id}] context_retry "
+                f"attempt={attempt + 1} max_tokens={max_tokens}->{retry_tokens}",
+                flush=True,
+            )
             max_tokens = retry_tokens
     raise RuntimeError(f"judge request failed after context retries: {last_error}") from last_error
 
@@ -165,6 +172,7 @@ async def run_async(args: argparse.Namespace) -> None:
                 )
                 async with output_lock:
                     write_jsonl(output_path, [row], append=True)
+                    progress.write(format_judge_task_log(row))
                     progress.update(1)
 
         await asyncio.gather(*(guarded_judge(task) for task in tasks))
@@ -173,7 +181,34 @@ async def run_async(args: argparse.Namespace) -> None:
     all_rows = load_jsonl(output_path)
     summary = summarize_race(all_rows)
     write_text(args.summary_file, json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    error_count = sum(1 for row in all_rows if row.get("error"))
+    print(f"Judge rows: total={len(all_rows)} valid={int(summary.get('n', 0.0))} errors={error_count}")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def format_judge_task_log(row: dict[str, Any]) -> str:
+    task_id = row.get("id")
+    if row.get("error"):
+        return (
+            f"[judge task={task_id}] ERROR "
+            f"error={str(row.get('error'))[:300]} "
+            f"judge_prompt_chars={row.get('judge_prompt_chars', '-')}"
+        )
+    return (
+        f"[judge task={task_id}] ok "
+        f"overall={safe_float_for_log(row.get('overall_score')):.4f} "
+        f"comp={safe_float_for_log(row.get('comprehensiveness')):.4f} "
+        f"insight={safe_float_for_log(row.get('insight')):.4f} "
+        f"instr={safe_float_for_log(row.get('instruction_following')):.4f} "
+        f"readability={safe_float_for_log(row.get('readability')):.4f}"
+    )
+
+
+def safe_float_for_log(value: Any) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
 
 
 def main() -> None:

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from collections import Counter
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,10 @@ async def run_task(
     progress: tqdm,
 ) -> None:
     task_id = int(task["id"])
+    task_log = ""
     try:
         result = await workflow.run(task)
+        summary = summarize_research_result(result)
         trace_path = None
         if trace_dir is not None:
             trace_path = trace_dir / f"{task_id}.json"
@@ -56,6 +59,7 @@ async def run_task(
         }
         if trace_path is not None:
             row["research_trace_file"] = str(trace_path)
+        task_log = format_research_task_log(task_id, row, summary, trace_path)
     except Exception as exc:
         row = {
             "id": task_id,
@@ -66,10 +70,113 @@ async def run_task(
             "model": model_name,
             "error": str(exc),
         }
+        task_log = f"[report task={task_id}] ERROR {str(exc)[:500]}"
 
     async with output_lock:
         write_jsonl(output_file, [row], append=True)
+        if task_log:
+            progress.write(task_log)
         progress.update(1)
+
+
+def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
+    trace = result.get("trace", [])
+    if not isinstance(trace, list):
+        trace = []
+
+    fetches: list[dict[str, Any]] = []
+    search_queries = 0
+    search_results = 0
+    reader_notes = 0
+    for round_item in trace:
+        if not isinstance(round_item, dict):
+            continue
+        plan = round_item.get("plan", {})
+        if isinstance(plan, dict):
+            queries = plan.get("search_queries", [])
+            if isinstance(queries, list):
+                search_queries += len(queries)
+        results_by_query = round_item.get("search_results", {})
+        if isinstance(results_by_query, dict):
+            search_results += sum(len(v) for v in results_by_query.values() if isinstance(v, list))
+        round_fetches = round_item.get("source_fetches", [])
+        if isinstance(round_fetches, list):
+            fetches.extend(item for item in round_fetches if isinstance(item, dict))
+        notes = round_item.get("reader_notes", [])
+        if isinstance(notes, list):
+            reader_notes += len(notes)
+
+    reader_chars = [safe_int(item.get("reader_content_chars")) for item in fetches]
+    reader_chars = [value for value in reader_chars if value >= 0]
+    errors = [
+        normalize_log_value(item.get("error"))
+        for item in fetches
+        if normalize_log_value(item.get("error"))
+    ]
+    error_counts = Counter(errors)
+    state = result.get("state", {})
+    if not isinstance(state, dict):
+        state = {}
+    return {
+        "rounds": len(trace),
+        "search_queries": search_queries,
+        "search_results": search_results,
+        "url_fetches": len(fetches),
+        "fetch_ok": sum(1 for item in fetches if item.get("ok") is True),
+        "full_text_sources": sum(1 for item in fetches if item.get("used_full_content") is True),
+        "reader_notes": reader_notes,
+        "reader_chars_avg": int(sum(reader_chars) / len(reader_chars)) if reader_chars else 0,
+        "reader_chars_max": max(reader_chars) if reader_chars else 0,
+        "fetch_errors": sum(error_counts.values()),
+        "top_fetch_errors": ",".join(
+            f"{name}:{count}" for name, count in error_counts.most_common(3)
+        ),
+        "article_chars": len(str(result.get("article", ""))),
+        "state_findings": len(state.get("findings", [])) if isinstance(state.get("findings"), list) else 0,
+        "state_evidence": len(state.get("evidence", [])) if isinstance(state.get("evidence"), list) else 0,
+    }
+
+
+def format_research_task_log(
+    task_id: int,
+    row: dict[str, Any],
+    summary: dict[str, Any],
+    trace_path: Path | None,
+) -> str:
+    trace_text = str(trace_path) if trace_path is not None else "-"
+    error_text = summary.get("top_fetch_errors") or "-"
+    return (
+        f"[report task={task_id}] ok "
+        f"article_chars={summary['article_chars']} "
+        f"rounds={summary['rounds']} "
+        f"search_queries={summary['search_queries']} "
+        f"search_results={summary['search_results']} "
+        f"url_fetches={summary['url_fetches']} "
+        f"fetch_ok={summary['fetch_ok']} "
+        f"full_text={summary['full_text_sources']} "
+        f"reader_notes={summary['reader_notes']} "
+        f"reader_chars_avg={summary['reader_chars_avg']} "
+        f"reader_chars_max={summary['reader_chars_max']} "
+        f"fetch_errors={summary['fetch_errors']} "
+        f"top_fetch_errors={error_text} "
+        f"state_findings={summary['state_findings']} "
+        f"state_evidence={summary['state_evidence']} "
+        f"trace={trace_text}"
+    )
+
+
+def safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return -1
+
+
+def normalize_log_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.split(":", 1)[0][:80]
 
 
 async def run_async(args: argparse.Namespace) -> None:
@@ -145,7 +252,10 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Max concurrent tasks: {args.max_concurrent_tasks}")
     print(f"Max concurrent LLM calls: {args.max_concurrent_llm_calls}")
     print(f"Max rounds: {args.max_rounds}")
+    print(f"Search count: {args.search_count}")
     print(f"Search top-k: {args.search_top_k}")
+    print(f"Search queries per round: {args.max_search_queries_per_round}")
+    print(f"Search domain filter: {args.search_domain_filter or '<none>'}")
     print(f"URL fetch enabled: {not args.disable_url_fetch}")
     if not args.disable_url_fetch:
         if args.url_visit_endpoint:
@@ -153,6 +263,10 @@ async def run_async(args: argparse.Namespace) -> None:
         print(f"Max concurrent URL fetches: {args.max_concurrent_url_fetches}")
         print(f"URL fetch timeout: {args.url_fetch_timeout_s}s")
         print(f"URL fetch max bytes: {args.url_fetch_max_bytes}")
+        print(f"Min fetched content chars: {args.min_fetched_content_chars}")
+        print(f"Source content max chars for reader: {args.source_content_max_chars}")
+    print(f"Max concurrent readers: {args.max_concurrent_readers}")
+    print(f"Trace dir: {trace_dir if trace_dir is not None else '<none>'}")
 
     task_semaphore = asyncio.Semaphore(args.max_concurrent_tasks)
     output_lock = asyncio.Lock()
