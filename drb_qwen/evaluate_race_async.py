@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 from typing import Any
 
 from tqdm import tqdm
@@ -38,12 +39,19 @@ async def judge_task(
     if error:
         return {"id": int(task["id"]), "prompt": task["prompt"], "error": error}
 
-    response = await llm.chat(
-        judge_prompt or "",
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_tokens=args.max_tokens,
-    )
+    try:
+        response = await call_judge_with_context_retry(
+            llm=llm,
+            judge_prompt=judge_prompt or "",
+            args=args,
+        )
+    except Exception as exc:
+        return {
+            "id": int(task["id"]),
+            "prompt": task["prompt"],
+            "error": str(exc),
+            "judge_prompt_chars": len(judge_prompt or ""),
+        }
     try:
         return score_item(
             task,
@@ -58,6 +66,55 @@ async def judge_task(
             "error": str(exc),
             "judge_response_text": response[:4000],
         }
+
+
+async def call_judge_with_context_retry(
+    llm: AsyncChatClient,
+    judge_prompt: str,
+    args: argparse.Namespace,
+) -> str:
+    max_tokens = args.max_tokens
+    last_error: Exception | None = None
+    for _ in range(args.context_retry_attempts + 1):
+        try:
+            return await llm.chat(
+                judge_prompt,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=max_tokens,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            retry_tokens = infer_retry_max_tokens(
+                str(exc),
+                current_max_tokens=max_tokens,
+                min_retry_max_tokens=args.min_retry_max_tokens,
+                safety_tokens=args.context_safety_tokens,
+            )
+            if retry_tokens is None:
+                raise
+            max_tokens = retry_tokens
+    raise RuntimeError(f"judge request failed after context retries: {last_error}") from last_error
+
+
+def infer_retry_max_tokens(
+    error_text: str,
+    current_max_tokens: int,
+    min_retry_max_tokens: int,
+    safety_tokens: int,
+) -> int | None:
+    context_match = re.search(r"maximum context length is (\d+) tokens", error_text)
+    input_match = re.search(r"prompt contains at least (\d+) input tokens", error_text)
+    if not context_match or not input_match:
+        return None
+    context_tokens = int(context_match.group(1))
+    input_tokens = int(input_match.group(1))
+    retry_tokens = context_tokens - input_tokens - safety_tokens
+    if retry_tokens < min_retry_max_tokens:
+        retry_tokens = max(1, retry_tokens)
+    if retry_tokens <= 0 or retry_tokens >= current_max_tokens:
+        return None
+    return retry_tokens
 
 
 async def run_async(args: argparse.Namespace) -> None:
@@ -90,6 +147,8 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Tasks: {len(tasks)}")
     print(f"Max concurrent judge tasks: {args.max_concurrent_tasks}")
     print(f"Max concurrent LLM calls: {args.max_concurrent_llm_calls}")
+    print(f"Judge max tokens: {args.max_tokens}")
+    print(f"Context retry attempts: {args.context_retry_attempts}")
 
     async with AsyncChatClient(llm_config) as llm:
         progress = tqdm(total=len(tasks), desc="Async RACE judging")
@@ -132,7 +191,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--save-judge-output", action="store_true")
-    parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--context-retry-attempts", type=int, default=2)
+    parser.add_argument("--context-safety-tokens", type=int, default=256)
+    parser.add_argument("--min-retry-max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
 

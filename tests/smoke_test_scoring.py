@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from drb_qwen.evaluate_race import build_item_prompt
+from drb_qwen.evaluate_race_async import infer_retry_max_tokens
 from drb_qwen.scoring import calculate_weighted_scores, normalize_pair_scores, summarize_race
 
 
 def main() -> None:
+    retry_tokens = infer_retry_max_tokens(
+        (
+            "This model's maximum context length is 32768 tokens. However, you requested "
+            "8192 output tokens and your prompt contains at least 24577 input tokens."
+        ),
+        current_max_tokens=8192,
+        min_retry_max_tokens=1024,
+        safety_tokens=256,
+    )
+    assert retry_tokens == 7935
+
     criteria = {
         "dimension_weight": {
             "comprehensiveness": 0.4,

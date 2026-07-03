@@ -27,7 +27,10 @@ MAX_SEARCH_QUERIES_PER_ROUND="${MAX_SEARCH_QUERIES_PER_ROUND:-3}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
 SEARCH_COUNT="${SEARCH_COUNT:-15}"
 REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}"
-JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-8192}"
+JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-4096}"
+JUDGE_CONTEXT_RETRY_ATTEMPTS="${JUDGE_CONTEXT_RETRY_ATTEMPTS:-2}"
+JUDGE_CONTEXT_SAFETY_TOKENS="${JUDGE_CONTEXT_SAFETY_TOKENS:-256}"
+JUDGE_MIN_RETRY_MAX_TOKENS="${JUDGE_MIN_RETRY_MAX_TOKENS:-1024}"
 VLLM_WAIT_RETRIES="${VLLM_WAIT_RETRIES:-120}"
 VLLM_WAIT_SLEEP="${VLLM_WAIT_SLEEP:-5}"
 LOG_DIR="${LOG_DIR:-${OUT_DIR}/logs}"
@@ -64,6 +67,7 @@ echo "URL fetch max bytes: ${URL_FETCH_MAX_BYTES}"
 echo "Max rounds: ${MAX_ROUNDS}"
 echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
 echo "Search top-k: ${SEARCH_TOP_K}"
+echo "Judge max tokens: ${JUDGE_MAX_TOKENS}"
 
 echo "Waiting for vLLM server: ${VLLM_BASE_URL}/models"
 VLLM_READY=0
@@ -141,6 +145,9 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.evaluate_race_async \
   --max-concurrent-tasks "${MAX_CONCURRENT_TASKS}" \
   --max-concurrent-llm-calls "${MAX_CONCURRENT_LLM_CALLS}" \
   --max-tokens "${JUDGE_MAX_TOKENS}" \
+  --context-retry-attempts "${JUDGE_CONTEXT_RETRY_ATTEMPTS}" \
+  --context-safety-tokens "${JUDGE_CONTEXT_SAFETY_TOKENS}" \
+  --min-retry-max-tokens "${JUDGE_MIN_RETRY_MAX_TOKENS}" \
   --temperature 0.0 \
   --top-p 1.0
 
