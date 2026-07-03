@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from drb_qwen.evaluate_race import build_item_prompt
 from drb_qwen.scoring import calculate_weighted_scores, normalize_pair_scores, summarize_race
 
 
@@ -39,10 +40,19 @@ def main() -> None:
     assert 0.0 <= normalized["overall_score"] <= 1.0
     assert normalized["overall_score"] > 0.5
     assert summary["n"] == 1.0
+
+    judge_prompt, error = build_item_prompt(
+        {"id": 1, "prompt": "p", "language": "en"},
+        target_by_prompt={"p": {"prompt": "p", "article": "", "error": "generation failed"}},
+        reference_by_prompt={"p": {"prompt": "p", "article": "reference"}},
+        criteria_by_prompt={"p": criteria},
+    )
+    assert judge_prompt is None
+    assert error and "generation error" in error
+
     print("smoke_test_scoring passed")
     print(summary)
 
 
 if __name__ == "__main__":
     main()
-

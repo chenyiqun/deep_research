@@ -3,14 +3,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .evaluate_race import build_item_prompt, score_item
-from .io_utils import existing_ids, filter_tasks, index_by_prompt, load_jsonl, write_jsonl, write_text
+from .io_utils import (
+    existing_ids,
+    filter_tasks,
+    index_by_prompt,
+    load_jsonl,
+    prepare_output_file,
+    write_jsonl,
+    write_text,
+)
 from .scoring import summarize_race
 
 
@@ -65,8 +72,7 @@ async def run_async(args: argparse.Namespace) -> None:
         print("No tasks to evaluate.")
         return
 
-    output_path = Path(args.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_output_file(args.output_file, resume=args.resume)
     output_lock = asyncio.Lock()
     task_semaphore = asyncio.Semaphore(args.max_concurrent_tasks)
 

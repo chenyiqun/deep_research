@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
-from .io_utils import existing_ids, filter_tasks, index_by_prompt, load_jsonl, write_jsonl, write_text
+from .io_utils import (
+    existing_ids,
+    filter_tasks,
+    index_by_prompt,
+    load_jsonl,
+    prepare_output_file,
+    write_jsonl,
+    write_text,
+)
 from .json_utils import extract_json
 from .prompts import build_race_judge_prompt, format_criteria_for_judge
 from .scoring import calculate_weighted_scores, normalize_pair_scores, summarize_race
@@ -33,12 +40,21 @@ def build_item_prompt(
         return None, "reference article not found"
     if criteria is None:
         return None, "criteria not found"
+    if target.get("error"):
+        return None, f"target article has generation error: {target.get('error')}"
+
+    target_article = str(target.get("article", "")).strip()
+    reference_article = str(reference.get("article", "")).strip()
+    if not target_article:
+        return None, "target article is empty"
+    if not reference_article:
+        return None, "reference article is empty"
 
     criteria_list = format_criteria_for_judge(criteria)
     judge_prompt = build_race_judge_prompt(
         task_prompt=prompt,
-        article_1=target.get("article", ""),
-        article_2=reference.get("article", ""),
+        article_1=target_article,
+        article_2=reference_article,
         criteria_list=criteria_list,
         language=task.get("language", "en"),
     )
@@ -139,8 +155,7 @@ def main() -> None:
         strip_thinking=True,
     )
 
-    output_path = Path(args.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_output_file(args.output_file, resume=args.resume)
     produced: list[dict[str, Any]] = []
 
     for start in tqdm(range(0, len(tasks), args.batch_size), desc="RACE judging"):

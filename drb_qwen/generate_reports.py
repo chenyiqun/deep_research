@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
-from .io_utils import existing_ids, filter_tasks, load_jsonl, write_jsonl
+from .io_utils import existing_ids, filter_tasks, load_jsonl, prepare_output_file, write_jsonl
 from .prompts import REPORT_SYSTEM_PROMPT, build_report_prompt
 from .vllm_chat import GenerationConfig, VLLMChatModel
 
@@ -76,8 +75,7 @@ def main() -> None:
         strip_thinking=True,
     )
 
-    output_path = Path(args.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_output_file(args.output_file, resume=args.resume)
 
     for batch in tqdm(batched(tasks, args.batch_size), desc="Generating reports"):
         prompts = [build_report_prompt(task) for task in batch]

@@ -4,13 +4,20 @@ import argparse
 import html
 import json
 import re
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from tqdm import tqdm
 
-from .io_utils import existing_ids, filter_tasks, index_by_prompt, load_jsonl, write_jsonl, write_text
+from .io_utils import (
+    existing_ids,
+    filter_tasks,
+    index_by_prompt,
+    load_jsonl,
+    prepare_output_file,
+    write_jsonl,
+    write_text,
+)
 from .json_utils import ensure_list, extract_json
 from .prompts import build_fact_extract_prompt, build_fact_validate_prompt
 from .scoring import summarize_fact
@@ -183,8 +190,7 @@ def main() -> None:
         strip_thinking=True,
     )
 
-    output_path = Path(args.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_output_file(args.output_file, resume=args.resume)
     produced: list[dict[str, Any]] = []
 
     for task in tqdm(tasks, desc="FACT evaluation"):

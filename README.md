@@ -42,6 +42,13 @@ Qwen3-8B:
 /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B
 ```
 
+Run a no-GPU static check after pulling new code:
+
+```bash
+cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/Deep_Research/deep_research
+bash scripts/check_pipeline_static.sh
+```
+
 Run a 2-task end-to-end smoke test:
 
 ```bash

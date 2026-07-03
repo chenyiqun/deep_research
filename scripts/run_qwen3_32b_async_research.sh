@@ -19,6 +19,8 @@ SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
 SEARCH_COUNT="${SEARCH_COUNT:-15}"
 REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-8192}"
+VLLM_WAIT_RETRIES="${VLLM_WAIT_RETRIES:-120}"
+VLLM_WAIT_SLEEP="${VLLM_WAIT_SLEEP:-5}"
 LOG_DIR="${LOG_DIR:-${OUT_DIR}/logs}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/run_${RUN_ID}.log}"
@@ -48,6 +50,22 @@ echo "Max concurrent LLM calls: ${MAX_CONCURRENT_LLM_CALLS}"
 echo "Max rounds: ${MAX_ROUNDS}"
 echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
 echo "Search top-k: ${SEARCH_TOP_K}"
+
+echo "Waiting for vLLM server: ${VLLM_BASE_URL}/models"
+VLLM_READY=0
+for ((attempt=1; attempt<=VLLM_WAIT_RETRIES; attempt++)); do
+  if curl -fsS "${VLLM_BASE_URL%/}/models" >/dev/null 2>&1; then
+    VLLM_READY=1
+    break
+  fi
+  echo "vLLM is not ready yet (${attempt}/${VLLM_WAIT_RETRIES}); sleeping ${VLLM_WAIT_SLEEP}s"
+  sleep "${VLLM_WAIT_SLEEP}"
+done
+if [[ "${VLLM_READY}" != "1" ]]; then
+  echo "ERROR: vLLM server did not become ready at ${VLLM_BASE_URL}/models"
+  exit 2
+fi
+echo "vLLM server is ready."
 
 REPORT_FILE="${OUT_DIR}/qwen3_32b_async_research_reports.jsonl"
 

@@ -39,6 +39,15 @@ def write_text(path: str | Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def prepare_output_file(path: str | Path, resume: bool = False) -> Path:
+    """Create the output directory and restart the file unless resuming."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and not resume:
+        path.unlink()
+    return path
+
+
 def index_by_prompt(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(row["prompt"]): row for row in rows if "prompt" in row}
 
@@ -78,4 +87,3 @@ def filter_tasks(
         if limit is not None and len(filtered) >= limit:
             break
     return filtered
-

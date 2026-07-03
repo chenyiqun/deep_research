@@ -34,6 +34,8 @@ nohup env \
   SEARCH_COUNT="${SEARCH_COUNT:-15}" \
   REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}" \
   JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-8192}" \
+  VLLM_WAIT_RETRIES="${VLLM_WAIT_RETRIES:-120}" \
+  VLLM_WAIT_SLEEP="${VLLM_WAIT_SLEEP:-5}" \
   bash "${REPO_DIR}/scripts/run_qwen3_32b_async_research.sh" \
   >/dev/null 2>&1 &
 

@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
-from .io_utils import existing_ids, filter_tasks, load_jsonl, write_jsonl, write_text
+from .io_utils import existing_ids, filter_tasks, load_jsonl, prepare_output_file, write_jsonl, write_text
 from .web_search import PROD_WEB_SEARCH_ENDPOINT, WebSearchClient, WebSearchConfig
 
 
@@ -78,8 +78,7 @@ async def run_async(args: argparse.Namespace) -> None:
         print("No tasks to process.")
         return
 
-    output_file = Path(args.output_file)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file = prepare_output_file(args.output_file, resume=args.resume)
     trace_dir = Path(args.trace_dir) if args.trace_dir else None
     if trace_dir is not None:
         trace_dir.mkdir(parents=True, exist_ok=True)
