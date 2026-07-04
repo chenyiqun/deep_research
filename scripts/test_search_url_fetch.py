@@ -4,9 +4,11 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 from urllib.parse import urlparse
 
 from drb_qwen.io_utils import load_jsonl, write_jsonl, write_text
@@ -16,7 +18,25 @@ from drb_qwen.web_search import PROD_WEB_SEARCH_ENDPOINT, SearchResult, WebSearc
 
 def main() -> None:
     args = build_parser().parse_args()
-    asyncio.run(run_async(args))
+    if args.disable_log:
+        asyncio.run(run_async(args))
+        return
+
+    log_file = Path(args.log_file) if args.log_file else default_log_file(args.summary_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    with log_file.open("a", encoding="utf-8", buffering=1) as f:
+        sys.stdout = TeeTextIO(original_stdout, f)
+        sys.stderr = TeeTextIO(original_stderr, f)
+        try:
+            print(f"Log file: {log_file}")
+            print(f"Started at: {datetime.now().isoformat(timespec='seconds')}")
+            asyncio.run(run_async(args))
+            print(f"Finished at: {datetime.now().isoformat(timespec='seconds')}")
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
 async def run_async(args: argparse.Namespace) -> None:
@@ -323,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-file", default="outputs/search_url_fetch_test/url_fetch_results.jsonl")
     parser.add_argument("--summary-file", default="outputs/search_url_fetch_test/summary.json")
     parser.add_argument("--search-results-file", default="outputs/search_url_fetch_test/search_results.jsonl")
+    parser.add_argument(
+        "--log-file",
+        default="",
+        help="Write process logs here. Defaults to <summary-file-dir>/logs/search_url_fetch_<timestamp>.log.",
+    )
+    parser.add_argument("--disable-log", action="store_true", help="Do not tee stdout/stderr to a log file.")
 
     parser.add_argument("--web-search-endpoint", default=PROD_WEB_SEARCH_ENDPOINT)
     parser.add_argument("--web-search-api-key", default="")
@@ -349,6 +375,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-extracted-chars", type=int, default=500)
     parser.add_argument("--max-urls", type=int, default=0)
     return parser
+
+
+class TeeTextIO:
+    def __init__(self, primary: TextIO, secondary: TextIO) -> None:
+        self.primary = primary
+        self.secondary = secondary
+        self.encoding = getattr(primary, "encoding", "utf-8")
+
+    def write(self, text: str) -> int:
+        self.primary.write(text)
+        self.secondary.write(text)
+        self.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        self.primary.flush()
+        self.secondary.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self.primary, "isatty", lambda: False)())
+
+
+def default_log_file(summary_file: str) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(summary_file).parent / "logs" / f"search_url_fetch_{timestamp}.log"
 
 
 if __name__ == "__main__":

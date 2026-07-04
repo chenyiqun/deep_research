@@ -202,7 +202,8 @@ PYTHONPATH="$PWD" python scripts/test_search_url_fetch.py \
   --url-fetch-cache-dir outputs/search_url_fetch_test/url_cache \
   --output-file outputs/search_url_fetch_test/url_fetch_results.jsonl \
   --search-results-file outputs/search_url_fetch_test/search_results.jsonl \
-  --summary-file outputs/search_url_fetch_test/summary.json
+  --summary-file outputs/search_url_fetch_test/summary.json \
+  --log-file outputs/search_url_fetch_test/logs/run.log
 ```
 
 Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
