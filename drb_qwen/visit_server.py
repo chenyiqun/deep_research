@@ -77,7 +77,7 @@ class VisitService:
 
         should_try_browser = (
             self.enable_crawl4ai
-            and ("pdf" not in (direct.content_type or "").lower())
+            and not is_probably_pdf(url, direct.content_type)
             and (not direct.ok or len(direct.text.strip()) < self.min_content_chars)
         )
         if should_try_browser:
@@ -154,6 +154,14 @@ async def fetch_with_crawl4ai(url: str, timeout_s: int) -> dict[str, Any]:
         return {"ok": False, "text": "", "error": "crawl4ai timeout"}
     except Exception as exc:
         return {"ok": False, "text": "", "error": str(exc)}
+
+
+def is_probably_pdf(url: str, content_type: str = "") -> bool:
+    lowered_type = (content_type or "").lower()
+    if "pdf" in lowered_type:
+        return True
+    lowered_url = str(url).lower().split("?", 1)[0].split("#", 1)[0]
+    return lowered_url.endswith(".pdf")
 
 
 def configure_app(args: argparse.Namespace) -> None:

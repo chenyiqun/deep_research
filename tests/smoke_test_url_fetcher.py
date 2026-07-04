@@ -6,6 +6,7 @@ from drb_qwen.url_fetcher import (
     select_relevant_excerpt,
     should_try_fetch_url,
 )
+from drb_qwen.visit_server import is_probably_pdf
 
 
 def main() -> None:
@@ -39,6 +40,9 @@ def main() -> None:
     assert "信用评级" in excerpt
     assert should_try_fetch_url("https://example.com/a")
     assert not should_try_fetch_url("ftp://example.com/a")
+    assert is_probably_pdf("https://example.com/report.pdf")
+    assert is_probably_pdf("https://example.com/download?id=1", "application/pdf")
+    assert not is_probably_pdf("https://example.com/article.html", "text/html")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"
     assert normalize_visit_endpoint("http://localhost:8765/visit") == "http://localhost:8765/visit"
     print("smoke_test_url_fetcher passed")
