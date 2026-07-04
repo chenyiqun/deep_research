@@ -18,6 +18,7 @@ VISIT_HTML_FETCH_MODE="${VISIT_HTML_FETCH_MODE:-crawl4ai_first}"
 VISIT_HTML_DIRECT_FALLBACK="${VISIT_HTML_DIRECT_FALLBACK:-0}"
 VISIT_CRAWL4AI_WAIT_UNTIL="${VISIT_CRAWL4AI_WAIT_UNTIL:-domcontentloaded}"
 VISIT_CRAWL4AI_MAX_RETRIES="${VISIT_CRAWL4AI_MAX_RETRIES:-2}"
+VISIT_CRAWL4AI_MAX_CONCURRENCY="${VISIT_CRAWL4AI_MAX_CONCURRENCY:-1}"
 VISIT_CACHE_ERRORS="${VISIT_CACHE_ERRORS:-0}"
 VISIT_SUMMARY_PROVIDER="${VISIT_SUMMARY_PROVIDER:-local_vllm}"
 VISIT_SUMMARY_BASE_URL="${VISIT_SUMMARY_BASE_URL:-http://127.0.0.1:8000/v1}"
@@ -59,6 +60,7 @@ echo "html fetch mode: ${VISIT_HTML_FETCH_MODE}"
 echo "html direct fallback: ${VISIT_HTML_DIRECT_FALLBACK}"
 echo "crawl4ai wait until: ${VISIT_CRAWL4AI_WAIT_UNTIL}"
 echo "crawl4ai max retries: ${VISIT_CRAWL4AI_MAX_RETRIES}"
+echo "crawl4ai max concurrency: ${VISIT_CRAWL4AI_MAX_CONCURRENCY}"
 echo "summary provider: ${VISIT_SUMMARY_PROVIDER}"
 echo "summary base URL: ${VISIT_SUMMARY_BASE_URL}"
 echo "summary model: ${VISIT_SUMMARY_MODEL}"
@@ -79,6 +81,7 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.visit_server \
   --html-fetch-mode "${VISIT_HTML_FETCH_MODE}" \
   --crawl4ai-wait-until "${VISIT_CRAWL4AI_WAIT_UNTIL}" \
   --crawl4ai-max-retries "${VISIT_CRAWL4AI_MAX_RETRIES}" \
+  --crawl4ai-max-concurrency "${VISIT_CRAWL4AI_MAX_CONCURRENCY}" \
   --summary-provider "${VISIT_SUMMARY_PROVIDER}" \
   --summary-base-url "${VISIT_SUMMARY_BASE_URL}" \
   --summary-model "${VISIT_SUMMARY_MODEL}" \

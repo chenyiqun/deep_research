@@ -71,6 +71,7 @@ class VisitService:
         html_direct_fallback: bool = False,
         crawl4ai_wait_until: str = "domcontentloaded",
         crawl4ai_max_retries: int = 2,
+        crawl4ai_max_concurrency: int = 1,
         summary_provider: str = "none",
         summary_base_url: str = "http://127.0.0.1:8000/v1",
         summary_model: str = "qwen3-32b",
@@ -91,6 +92,7 @@ class VisitService:
         self.html_direct_fallback = html_direct_fallback
         self.crawl4ai_wait_until = crawl4ai_wait_until
         self.crawl4ai_max_retries = crawl4ai_max_retries
+        self.crawl4ai_max_concurrency = max(1, crawl4ai_max_concurrency)
         self.summary_provider = normalize_summary_provider(summary_provider)
         self.summary_base_url = summary_base_url
         self.summary_model = summary_model
@@ -106,6 +108,7 @@ class VisitService:
         self.summarizer: AsyncChatClient | None = None
         self._crawler: Any | None = None
         self._crawler_lock = asyncio.Lock()
+        self._crawl4ai_semaphore = asyncio.Semaphore(self.crawl4ai_max_concurrency)
 
     async def start(self) -> None:
         self.fetcher = await URLContentFetcher(self.fetch_config).__aenter__()
@@ -214,7 +217,8 @@ class VisitService:
         return direct, browser_result.error
 
     async def _fetch_with_persistent_crawl4ai(self, url: str) -> URLFetchResult:
-        result = await self._read_html_with_crawl4ai(url)
+        async with self._crawl4ai_semaphore:
+            result = await self._read_html_with_crawl4ai(url)
         text = clean_text(str(result.get("text") or ""))
         return URLFetchResult(
             url=url,
@@ -279,8 +283,10 @@ class VisitService:
                 "final_url": url,
             }
         except asyncio.TimeoutError:
+            await self._restart_crawler()
             return {"ok": False, "text": "", "error": "crawl4ai timeout"}
         except Exception as exc:
+            await self._restart_crawler()
             return {"ok": False, "text": "", "error": format_crawl4ai_exception(exc)}
 
     async def _get_crawler(self) -> Any:
@@ -301,6 +307,9 @@ class VisitService:
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
                     "--disable-extensions",
+                    "--ignore-certificate-errors",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process",
                 ],
             }
             browser_kwargs_with_memory = {
@@ -320,6 +329,9 @@ class VisitService:
             await crawler.start()
             self._crawler = crawler
             return crawler
+
+    async def _restart_crawler(self) -> None:
+        await self._close_crawler()
 
     async def _close_crawler(self) -> None:
         async with self._crawler_lock:
@@ -715,6 +727,7 @@ def configure_app(args: argparse.Namespace) -> None:
         html_direct_fallback=args.html_direct_fallback,
         crawl4ai_wait_until=args.crawl4ai_wait_until,
         crawl4ai_max_retries=args.crawl4ai_max_retries,
+        crawl4ai_max_concurrency=args.crawl4ai_max_concurrency,
         summary_provider=args.summary_provider,
         summary_base_url=args.summary_base_url,
         summary_model=args.summary_model,
@@ -753,6 +766,7 @@ if app is not None:
                     in {"1", "true", "yes"},
                     crawl4ai_wait_until=os.environ.get("VISIT_CRAWL4AI_WAIT_UNTIL", "domcontentloaded"),
                     crawl4ai_max_retries=int(os.environ.get("VISIT_CRAWL4AI_MAX_RETRIES", "2")),
+                    crawl4ai_max_concurrency=int(os.environ.get("VISIT_CRAWL4AI_MAX_CONCURRENCY", "1")),
                     summary_provider=os.environ.get("VISIT_SUMMARY_PROVIDER", "none"),
                     summary_base_url=os.environ.get("VISIT_SUMMARY_BASE_URL", "http://127.0.0.1:8000/v1"),
                     summary_model=os.environ.get("VISIT_SUMMARY_MODEL", "qwen3-32b"),
@@ -804,6 +818,7 @@ def main() -> None:
     parser.add_argument("--html-direct-fallback", action="store_true")
     parser.add_argument("--crawl4ai-wait-until", default="domcontentloaded")
     parser.add_argument("--crawl4ai-max-retries", type=int, default=2)
+    parser.add_argument("--crawl4ai-max-concurrency", type=int, default=1)
     parser.add_argument("--summary-provider", default="none", choices=["none", "local_vllm"])
     parser.add_argument("--summary-base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--summary-model", default="qwen3-32b")

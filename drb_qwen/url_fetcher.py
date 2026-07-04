@@ -215,8 +215,8 @@ class URLContentFetcher:
                     content = clean_text(str(content))
                     extraction_method = ""
                     final_url = url
-                    status = response.status
-                    content_type = response.headers.get("content-type", "")
+                    status = None
+                    content_type = ""
                     raw_text_chars = len(content)
                     server_error = ""
                     summary_provider = ""
@@ -227,8 +227,8 @@ class URLContentFetcher:
                     if isinstance(data, dict):
                         extraction_method = str(data.get("extraction_method", "") or data.get("method", ""))
                         final_url = str(data.get("final_url", "") or url)
-                        status = safe_int(data.get("status"), response.status)
-                        content_type = str(data.get("content_type") or content_type)
+                        status = safe_int(data.get("status"), None) if data.get("status") is not None else None
+                        content_type = str(data.get("content_type") or "")
                         raw_text_chars = safe_int(data.get("raw_text_chars"), len(content))
                         server_error = str(data.get("error") or "")
                         summary_provider = str(data.get("summary_provider") or "")

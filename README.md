@@ -181,12 +181,13 @@ For the no-paid best-effort path, run the bundled visit server with crawl4ai-fir
 VISIT_ENABLE_CRAWL4AI=1 \
 VISIT_HTML_FETCH_MODE=crawl4ai_first \
 VISIT_HTML_DIRECT_FALLBACK=0 \
-VISIT_CRAWL4AI_TIMEOUT_S=45 \
+VISIT_CRAWL4AI_TIMEOUT_S=75 \
 VISIT_CRAWL4AI_MAX_RETRIES=2 \
+VISIT_CRAWL4AI_MAX_CONCURRENCY=1 \
 VISIT_SUMMARY_PROVIDER=local_vllm \
 VISIT_SUMMARY_BASE_URL=http://127.0.0.1:8000/v1 \
 VISIT_SUMMARY_MODEL=qwen3-32b \
-VISIT_SUMMARY_MAX_CONCURRENT_REQUESTS=2 \
+VISIT_SUMMARY_MAX_CONCURRENT_REQUESTS=1 \
 bash scripts/launch_visit_server_bg.sh
 ```
 
@@ -204,8 +205,8 @@ PYTHONPATH="$PWD" python scripts/test_search_url_fetch.py \
   --search-top-k 8 \
   --url-visit-endpoint http://127.0.0.1:8765/visit \
   --disable-url-visit-fallback \
-  --url-visit-timeout-s 90 \
-  --max-concurrent-url-fetches 4 \
+  --url-visit-timeout-s 150 \
+  --max-concurrent-url-fetches 1 \
   --url-fetch-cache-dir outputs/search_url_fetch_test/url_cache \
   --output-file outputs/search_url_fetch_test/url_fetch_results.jsonl \
   --search-results-file outputs/search_url_fetch_test/search_results.jsonl \
