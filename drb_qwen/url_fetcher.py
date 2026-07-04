@@ -50,6 +50,11 @@ class URLFetchResult:
     cached: bool = False
     extraction_method: str = ""
     raw_text_chars: int = 0
+    raw_content_chars: int = 0
+    summary_provider: str = ""
+    summary_model: str = ""
+    summary_error: str = ""
+    summary_chars: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -214,6 +219,11 @@ class URLContentFetcher:
                     content_type = response.headers.get("content-type", "")
                     raw_text_chars = len(content)
                     server_error = ""
+                    summary_provider = ""
+                    summary_model = ""
+                    summary_error = ""
+                    summary_chars = 0
+                    raw_content_chars = 0
                     if isinstance(data, dict):
                         extraction_method = str(data.get("extraction_method", "") or data.get("method", ""))
                         final_url = str(data.get("final_url", "") or url)
@@ -221,6 +231,11 @@ class URLContentFetcher:
                         content_type = str(data.get("content_type") or content_type)
                         raw_text_chars = safe_int(data.get("raw_text_chars"), len(content))
                         server_error = str(data.get("error") or "")
+                        summary_provider = str(data.get("summary_provider") or "")
+                        summary_model = str(data.get("summary_model") or "")
+                        summary_error = str(data.get("summary_error") or "")
+                        summary_chars = safe_int(data.get("summary_chars"), 0)
+                        raw_content_chars = safe_int(data.get("raw_content_chars"), 0)
                     return URLFetchResult(
                         url=url,
                         ok=bool(content),
@@ -232,6 +247,11 @@ class URLContentFetcher:
                         source="visit_server",
                         extraction_method=extraction_method or "visit_server",
                         raw_text_chars=raw_text_chars,
+                        raw_content_chars=raw_content_chars,
+                        summary_provider=summary_provider,
+                        summary_model=summary_model,
+                        summary_error=summary_error,
+                        summary_chars=summary_chars,
                     )
             except Exception as exc:
                 last_error = exc

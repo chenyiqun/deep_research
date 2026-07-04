@@ -175,6 +175,19 @@ traces/<id>.json                        # per-task search/read/state trace
 
 If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. The workflow will call `POST /visit` with `{"url": ..., "goal": ...}` first, then fall back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`.
 
+For the no-paid best-effort path, run the bundled visit server with local extraction, optional crawl4ai browser fallback, and local Qwen/vLLM goal summaries:
+
+```bash
+VISIT_ENABLE_CRAWL4AI=1 \
+VISIT_SUMMARY_PROVIDER=local_vllm \
+VISIT_SUMMARY_BASE_URL=http://127.0.0.1:8000/v1 \
+VISIT_SUMMARY_MODEL=qwen3-32b \
+VISIT_SUMMARY_MAX_CONCURRENT_REQUESTS=4 \
+bash scripts/launch_visit_server_bg.sh
+```
+
+This does not call DeepSeek or paid Jina. It uses the same local vLLM server as the report generator to compress each fetched URL into a goal-based visit summary before the reader agent consumes it.
+
 Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
 
 ```bash

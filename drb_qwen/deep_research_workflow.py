@@ -451,6 +451,7 @@ content:
 </source>
 
 置信度规则：
+- source_quality=goal_summary_visit 时，内容是本地 visit summarizer 基于抓取正文产出的目标摘要，可作为较强证据，但 evidence 应保留摘要中的来源依据。
 - source_quality 以 full_text 开头时，来源正文可作为主要证据。
 - source_quality=snippet_only 或 fetch_failed 时，默认不要给 high confidence，除非 snippet 本身来自非常权威来源且事实非常直接。
 - 不要改写 URL；source_url 必须原样复制。
@@ -500,6 +501,7 @@ content:
 </source>
 
 Confidence rules:
+- When source_quality=goal_summary_visit, the content is a goal-based summary generated from fetched page text by the local visit summarizer. It is stronger than a snippet, but evidence should preserve the summary's support.
 - When source_quality starts with full_text, the page text can be used as primary evidence.
 - When source_quality=snippet_only or fetch_failed, do not assign high confidence by default unless the snippet is directly from an authoritative source.
 - Do not rewrite URLs; source_url must be copied exactly.
@@ -538,7 +540,7 @@ def build_query_summarizer_prompt(
         return f"""
 请把同一个 search query 下多个 reader 的结果综合成一份 query-level core information。
 保留 URL 归因，区分事实、推断、不确定性和冲突。
-优先使用 source_quality=full_text 的 reader notes；snippet_only/fetch_failed 只能作为弱证据或检索线索。
+优先使用 source_quality=goal_summary_visit 或 full_text 的 reader notes；snippet_only/fetch_failed 只能作为弱证据或检索线索。
 low_value_sources 只能填 reader_notes 中已有的 source_url 原文，不要生成或改写 URL。
 
 <original_question>
@@ -575,7 +577,7 @@ low_value_sources 只能填 reader_notes 中已有的 source_url 原文，不要
     return f"""
 Synthesize multiple reader notes for one search query into query-level core information.
 Preserve URL attribution and separate facts, inference, uncertainty, and conflicts.
-Prefer reader notes with source_quality=full_text. Treat snippet_only/fetch_failed notes as weak evidence or search leads.
+Prefer reader notes with source_quality=goal_summary_visit or full_text. Treat snippet_only/fetch_failed notes as weak evidence or search leads.
 low_value_sources must only contain exact source_url values copied from reader_notes; do not generate or rewrite URLs.
 
 <original_question>
@@ -629,7 +631,7 @@ def build_state_updater_prompt(
 2. 只输出新增信息、对旧信息的修正、被解决的问题、仍存在的冲突、下一轮搜索提示。
 3. evidence 必须保留 source_url。
 4. 如果当前轮次发现之前信息可能错误，放入 corrected_findings。
-5. snippet_only/fetch_failed 证据默认不能升级为 high confidence；优先保留 full_text 证据。
+5. snippet_only/fetch_failed 证据默认不能升级为 high confidence；优先保留 goal_summary_visit/full_text 证据。
 
 <original_question>
 {task["prompt"]}
@@ -681,7 +683,7 @@ Rules:
 2. Output only new information, corrections, resolved questions, unresolved conflicts, and next-search hints.
 3. Evidence must preserve source_url.
 4. If this round shows previous information may be wrong, put it in corrected_findings.
-5. Do not upgrade snippet_only/fetch_failed evidence to high confidence by default; prefer full_text evidence.
+5. Do not upgrade snippet_only/fetch_failed evidence to high confidence by default; prefer goal_summary_visit/full_text evidence.
 
 <original_question>
 {task["prompt"]}
@@ -875,16 +877,25 @@ def build_reader_source_content(
             max_chars=config.source_content_max_chars,
         )
         method = fetch_result.extraction_method or fetch_result.source or "direct"
+        acquisition_kind = "goal_summary" if "goal_summary" in method else "full_text"
+        raw_chars = (
+            fetch_result.raw_content_chars
+            or fetch_result.raw_text_chars
+            or len(fetched_text)
+        )
         source_note = (
-            "Source acquisition: full_text "
+            f"Source acquisition: {acquisition_kind} "
             f"(source={fetch_result.source}, method={method}, "
-            f"raw_text_chars={fetch_result.raw_text_chars or len(fetched_text)}, "
+            f"raw_text_chars={raw_chars}, "
+            f"summary_chars={fetch_result.summary_chars}, "
             f"cached={fetch_result.cached})."
         )
+        if fetch_result.summary_error:
+            source_note += f" Summary note: {fetch_result.summary_error}."
         if snippet:
             return (
                 f"{source_note}\n"
-                "Fetched URL text, preferred evidence:\n"
+                "Fetched URL content or goal-based summary, preferred evidence:\n"
                 f"{full_text}\n\n"
                 "Original search snippet, use only as secondary context:\n"
                 f"{snippet}",
@@ -914,6 +925,8 @@ def build_reader_source_content(
 
 def source_quality_from_fetch(fetch_result: URLFetchResult, used_full_content: bool) -> str:
     if used_full_content:
+        if "goal_summary" in (fetch_result.extraction_method or ""):
+            return "goal_summary_visit"
         if fetch_result.source == "visit_server":
             return "full_text_visit"
         if "pdf" in (fetch_result.extraction_method or ""):
