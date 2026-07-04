@@ -11,7 +11,13 @@ from typing import Any
 
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .json_utils import extract_json
-from .url_fetcher import URLContentFetcher, URLFetchConfig, clean_text, select_relevant_excerpt
+from .url_fetcher import (
+    URLContentFetcher,
+    URLFetchConfig,
+    URLFetchResult,
+    clean_text,
+    select_relevant_excerpt,
+)
 
 
 try:
@@ -61,6 +67,10 @@ class VisitService:
         min_content_chars: int = 500,
         enable_crawl4ai: bool = False,
         crawl4ai_timeout_s: int = 45,
+        html_fetch_mode: str = "crawl4ai_first",
+        html_direct_fallback: bool = False,
+        crawl4ai_wait_until: str = "domcontentloaded",
+        crawl4ai_max_retries: int = 2,
         summary_provider: str = "none",
         summary_base_url: str = "http://127.0.0.1:8000/v1",
         summary_model: str = "qwen3-32b",
@@ -77,6 +87,10 @@ class VisitService:
         self.min_content_chars = min_content_chars
         self.enable_crawl4ai = enable_crawl4ai
         self.crawl4ai_timeout_s = crawl4ai_timeout_s
+        self.html_fetch_mode = normalize_html_fetch_mode(html_fetch_mode)
+        self.html_direct_fallback = html_direct_fallback
+        self.crawl4ai_wait_until = crawl4ai_wait_until
+        self.crawl4ai_max_retries = crawl4ai_max_retries
         self.summary_provider = normalize_summary_provider(summary_provider)
         self.summary_base_url = summary_base_url
         self.summary_model = summary_model
@@ -90,6 +104,8 @@ class VisitService:
         self.summary_cache_dir = Path(fetch_config.cache_dir) / "goal_summary" if fetch_config.cache_dir else None
         self.fetcher: URLContentFetcher | None = None
         self.summarizer: AsyncChatClient | None = None
+        self._crawler: Any | None = None
+        self._crawler_lock = asyncio.Lock()
 
     async def start(self) -> None:
         self.fetcher = await URLContentFetcher(self.fetch_config).__aenter__()
@@ -108,6 +124,7 @@ class VisitService:
     async def close(self) -> None:
         if self.summarizer is not None:
             await self.summarizer.__aexit__(None, None, None)
+        await self._close_crawler()
         if self.fetcher is not None:
             await self.fetcher.__aexit__(None, None, None)
         self.summarizer = None
@@ -117,30 +134,7 @@ class VisitService:
         if self.fetcher is None:
             raise RuntimeError("VisitService has not started.")
 
-        direct = await self.fetcher.fetch(url, goal="")
-        best = direct
-        browser_error = ""
-
-        should_try_browser = (
-            self.enable_crawl4ai
-            and not is_probably_pdf(url, direct.content_type)
-            and (not direct.ok or len(direct.text.strip()) < self.min_content_chars)
-        )
-        if should_try_browser:
-            browser_result = await fetch_with_crawl4ai(url, timeout_s=self.crawl4ai_timeout_s)
-            if browser_result["ok"]:
-                browser_text = clean_text(browser_result["text"])
-                if len(browser_text) > len(direct.text):
-                    direct.text = browser_text
-                    direct.ok = True
-                    direct.error = ""
-                    direct.source = "visit_server"
-                    direct.extraction_method = browser_result["extraction_method"]
-                    direct.raw_text_chars = len(browser_text)
-                    direct.final_url = browser_result.get("final_url") or direct.final_url or url
-                    best = direct
-            else:
-                browser_error = browser_result["error"]
+        best, browser_error = await self._fetch_best_content(url)
 
         raw_text = clean_text(best.text)
         text = ""
@@ -176,6 +170,166 @@ class VisitService:
         )
         payload.pop("text", None)
         return payload
+
+    async def _fetch_best_content(self, url: str) -> tuple[URLFetchResult, str]:
+        if self.fetcher is None:
+            raise RuntimeError("VisitService has not started.")
+
+        if not self.enable_crawl4ai or is_probably_pdf(url):
+            return await self.fetcher.fetch(url, goal=""), ""
+
+        if self.html_fetch_mode == "crawl4ai_first":
+            browser_result = await self._fetch_with_persistent_crawl4ai(url)
+            browser_error = browser_result.error
+            if browser_result.ok and (
+                len(browser_result.text.strip()) >= self.min_content_chars
+                or not self.html_direct_fallback
+            ):
+                return browser_result, ""
+            if not self.html_direct_fallback:
+                return browser_result, browser_error
+
+            direct = await self.fetcher.fetch(url, goal="")
+            if direct.ok and len(direct.text.strip()) >= max(len(browser_result.text.strip()), self.min_content_chars):
+                direct.visit_error = browser_error
+                return direct, browser_error
+            if browser_result.ok:
+                browser_result.visit_error = direct.error
+                return browser_result, direct.error
+            direct.visit_error = browser_error
+            return direct, browser_error
+
+        direct = await self.fetcher.fetch(url, goal="")
+        should_try_browser = (
+            not is_probably_pdf(url, direct.content_type)
+            and (not direct.ok or len(direct.text.strip()) < self.min_content_chars)
+        )
+        if not should_try_browser:
+            return direct, ""
+
+        browser_result = await self._fetch_with_persistent_crawl4ai(url)
+        if browser_result.ok and len(browser_result.text.strip()) > len(direct.text.strip()):
+            browser_result.visit_error = direct.error
+            return browser_result, ""
+        return direct, browser_result.error
+
+    async def _fetch_with_persistent_crawl4ai(self, url: str) -> URLFetchResult:
+        result = await self._read_html_with_crawl4ai(url)
+        text = clean_text(str(result.get("text") or ""))
+        return URLFetchResult(
+            url=url,
+            ok=bool(result.get("ok") and text),
+            content_type="text/markdown",
+            final_url=str(result.get("final_url") or url),
+            text=text,
+            error="" if result.get("ok") and text else str(result.get("error") or "crawl4ai returned empty content"),
+            source="visit_server",
+            extraction_method=str(result.get("extraction_method") or "html_crawl4ai"),
+            raw_text_chars=len(text),
+        )
+
+    async def _read_html_with_crawl4ai(self, url: str) -> dict[str, Any]:
+        try:
+            from crawl4ai import CrawlerRunConfig
+            from crawl4ai.content_filter_strategy import PruningContentFilter
+            from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+        except Exception as exc:
+            return {"ok": False, "text": "", "error": f"crawl4ai unavailable: {exc}"}
+
+        prune_filter = PruningContentFilter(threshold=0.4, threshold_type="dynamic", min_word_threshold=3)
+        md_generator = DefaultMarkdownGenerator(
+            content_filter=prune_filter,
+            options={"ignore_links": False},
+        )
+        config_kwargs: dict[str, Any] = {
+            "markdown_generator": md_generator,
+            "page_timeout": min(self.crawl4ai_timeout_s * 1000, 90_000),
+            "verbose": False,
+        }
+        if self.crawl4ai_wait_until:
+            config_kwargs["wait_until"] = self.crawl4ai_wait_until
+        if self.crawl4ai_max_retries >= 0:
+            config_kwargs["max_retries"] = self.crawl4ai_max_retries
+        try:
+            crawler_config = CrawlerRunConfig(**config_kwargs)
+        except TypeError:
+            config_kwargs.pop("wait_until", None)
+            config_kwargs.pop("max_retries", None)
+            crawler_config = CrawlerRunConfig(**config_kwargs)
+
+        try:
+            crawler = await self._get_crawler()
+            result = await asyncio.wait_for(
+                crawler.arun(url=url, config=crawler_config),
+                timeout=self.crawl4ai_timeout_s,
+            )
+            if not getattr(result, "success", False):
+                return {"ok": False, "text": "", "error": getattr(result, "error_message", "") or "crawl4ai failed"}
+            markdown = getattr(result, "markdown", None)
+            if markdown is None:
+                return {"ok": False, "text": "", "error": "crawl4ai returned no markdown payload"}
+            fit_markdown = clean_text(getattr(markdown, "fit_markdown", "") or "")
+            raw_markdown = clean_text(getattr(markdown, "raw_markdown", "") or "")
+            text = fit_markdown or raw_markdown
+            return {
+                "ok": bool(text.strip()),
+                "text": text,
+                "error": "" if text.strip() else "crawl4ai returned empty content",
+                "extraction_method": "html_crawl4ai",
+                "final_url": url,
+            }
+        except asyncio.TimeoutError:
+            return {"ok": False, "text": "", "error": "crawl4ai timeout"}
+        except Exception as exc:
+            return {"ok": False, "text": "", "error": format_crawl4ai_exception(exc)}
+
+    async def _get_crawler(self) -> Any:
+        try:
+            from crawl4ai import AsyncWebCrawler, BrowserConfig
+        except Exception as exc:
+            raise RuntimeError(f"crawl4ai unavailable: {exc}") from exc
+
+        async with self._crawler_lock:
+            if self._crawler is not None:
+                return self._crawler
+
+            browser_kwargs: dict[str, Any] = {
+                "headless": True,
+                "verbose": False,
+                "extra_args": [
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-extensions",
+                ],
+            }
+            browser_kwargs_with_memory = {
+                **browser_kwargs,
+                "memory_saving_mode": True,
+                "max_pages_before_recycle": 500,
+            }
+            try:
+                browser_config = BrowserConfig(**browser_kwargs_with_memory)
+            except TypeError:
+                browser_config = BrowserConfig(**browser_kwargs)
+
+            try:
+                crawler = AsyncWebCrawler(config=browser_config, thread_safe=False)
+            except TypeError:
+                crawler = AsyncWebCrawler(config=browser_config)
+            await crawler.start()
+            self._crawler = crawler
+            return crawler
+
+    async def _close_crawler(self) -> None:
+        async with self._crawler_lock:
+            crawler = self._crawler
+            self._crawler = None
+        if crawler is not None:
+            try:
+                await crawler.close()
+            except Exception:
+                pass
 
     async def _summarize_url_content(
         self,
@@ -501,12 +655,31 @@ def normalize_summary_provider(value: str) -> str:
     raise ValueError(f"Unsupported summary provider: {value}")
 
 
+def normalize_html_fetch_mode(value: str) -> str:
+    mode = str(value or "crawl4ai_first").strip().lower()
+    if mode in {"browser_first", "crawl4ai", "crawl4ai_first"}:
+        return "crawl4ai_first"
+    if mode in {"direct", "direct_first"}:
+        return "direct_first"
+    raise ValueError(f"Unsupported HTML fetch mode: {value}")
+
+
 def append_method(method: str, suffix: str) -> str:
     if not method:
         return suffix
     if suffix in method:
         return method
     return f"{method}+{suffix}"
+
+
+def format_crawl4ai_exception(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    if "Executable doesn't exist" in message or "playwright" in message.lower():
+        return (
+            f"{message} Install browser runtime with `python -m playwright install chromium` "
+            "after installing crawl4ai."
+        )
+    return message
 
 
 def json_escape(text: str) -> str:
@@ -538,6 +711,10 @@ def configure_app(args: argparse.Namespace) -> None:
         min_content_chars=args.min_content_chars,
         enable_crawl4ai=args.enable_crawl4ai,
         crawl4ai_timeout_s=args.crawl4ai_timeout_s,
+        html_fetch_mode=args.html_fetch_mode,
+        html_direct_fallback=args.html_direct_fallback,
+        crawl4ai_wait_until=args.crawl4ai_wait_until,
+        crawl4ai_max_retries=args.crawl4ai_max_retries,
         summary_provider=args.summary_provider,
         summary_base_url=args.summary_base_url,
         summary_model=args.summary_model,
@@ -571,6 +748,11 @@ if app is not None:
                     enable_crawl4ai=os.environ.get("VISIT_ENABLE_CRAWL4AI", "0").lower()
                     in {"1", "true", "yes"},
                     crawl4ai_timeout_s=int(os.environ.get("VISIT_CRAWL4AI_TIMEOUT_S", "45")),
+                    html_fetch_mode=os.environ.get("VISIT_HTML_FETCH_MODE", "crawl4ai_first"),
+                    html_direct_fallback=os.environ.get("VISIT_HTML_DIRECT_FALLBACK", "0").lower()
+                    in {"1", "true", "yes"},
+                    crawl4ai_wait_until=os.environ.get("VISIT_CRAWL4AI_WAIT_UNTIL", "domcontentloaded"),
+                    crawl4ai_max_retries=int(os.environ.get("VISIT_CRAWL4AI_MAX_RETRIES", "2")),
                     summary_provider=os.environ.get("VISIT_SUMMARY_PROVIDER", "none"),
                     summary_base_url=os.environ.get("VISIT_SUMMARY_BASE_URL", "http://127.0.0.1:8000/v1"),
                     summary_model=os.environ.get("VISIT_SUMMARY_MODEL", "qwen3-32b"),
@@ -618,6 +800,10 @@ def main() -> None:
     parser.add_argument("--min-content-chars", type=int, default=500)
     parser.add_argument("--enable-crawl4ai", action="store_true")
     parser.add_argument("--crawl4ai-timeout-s", type=int, default=45)
+    parser.add_argument("--html-fetch-mode", default="crawl4ai_first", choices=["crawl4ai_first", "direct_first"])
+    parser.add_argument("--html-direct-fallback", action="store_true")
+    parser.add_argument("--crawl4ai-wait-until", default="domcontentloaded")
+    parser.add_argument("--crawl4ai-max-retries", type=int, default=2)
     parser.add_argument("--summary-provider", default="none", choices=["none", "local_vllm"])
     parser.add_argument("--summary-base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--summary-model", default="qwen3-32b")

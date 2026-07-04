@@ -175,14 +175,18 @@ traces/<id>.json                        # per-task search/read/state trace
 
 If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. The workflow will call `POST /visit` with `{"url": ..., "goal": ...}` first, then fall back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`.
 
-For the no-paid best-effort path, run the bundled visit server with local extraction, optional crawl4ai browser fallback, and local Qwen/vLLM goal summaries:
+For the no-paid best-effort path, run the bundled visit server with crawl4ai-first HTML extraction, local PDF extraction, and local Qwen/vLLM goal summaries:
 
 ```bash
 VISIT_ENABLE_CRAWL4AI=1 \
+VISIT_HTML_FETCH_MODE=crawl4ai_first \
+VISIT_HTML_DIRECT_FALLBACK=0 \
+VISIT_CRAWL4AI_TIMEOUT_S=45 \
+VISIT_CRAWL4AI_MAX_RETRIES=2 \
 VISIT_SUMMARY_PROVIDER=local_vllm \
 VISIT_SUMMARY_BASE_URL=http://127.0.0.1:8000/v1 \
 VISIT_SUMMARY_MODEL=qwen3-32b \
-VISIT_SUMMARY_MAX_CONCURRENT_REQUESTS=4 \
+VISIT_SUMMARY_MAX_CONCURRENT_REQUESTS=2 \
 bash scripts/launch_visit_server_bg.sh
 ```
 
@@ -199,6 +203,9 @@ PYTHONPATH="$PWD" python scripts/test_search_url_fetch.py \
   --search-count 15 \
   --search-top-k 8 \
   --url-visit-endpoint http://127.0.0.1:8765/visit \
+  --disable-url-visit-fallback \
+  --url-visit-timeout-s 90 \
+  --max-concurrent-url-fetches 4 \
   --url-fetch-cache-dir outputs/search_url_fetch_test/url_cache \
   --output-file outputs/search_url_fetch_test/url_fetch_results.jsonl \
   --search-results-file outputs/search_url_fetch_test/search_results.jsonl \

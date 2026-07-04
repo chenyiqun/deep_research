@@ -99,7 +99,12 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Unique fetchable URLs: {len(unique_results)}")
 
     async with URLContentFetcher(fetch_config) as fetcher:
-        fetch_rows = await run_fetches(fetcher, unique_results, args.min_extracted_chars)
+        fetch_rows = await run_fetches(
+            fetcher,
+            unique_results,
+            args.min_extracted_chars,
+            print_each=not args.quiet_fetch_rows,
+        )
 
     write_jsonl(output_file, fetch_rows)
     summary = summarize(fetch_rows, search_rows, query_rows, args.min_extracted_chars)
@@ -161,6 +166,7 @@ async def run_fetches(
     fetcher: URLContentFetcher,
     results: list[SearchResult],
     min_extracted_chars: int,
+    print_each: bool = True,
 ) -> list[dict[str, Any]]:
     async def fetch_one(index: int, result: SearchResult) -> dict[str, Any]:
         goal = build_fetch_goal(result)
@@ -191,7 +197,10 @@ async def run_fetches(
     tasks = [asyncio.create_task(fetch_one(index, result)) for index, result in enumerate(results, start=1)]
     rows: list[dict[str, Any]] = []
     for task in progress_as_completed(tasks, desc="URL fetch"):
-        rows.append(await task)
+        row = await task
+        rows.append(row)
+        if print_each:
+            print(format_fetch_row(row, len(results)))
     rows.sort(key=lambda row: int(row.get("index") or 0))
     return rows
 
@@ -302,6 +311,24 @@ def build_fetch_goal(result: SearchResult) -> str:
     )
 
 
+def format_fetch_row(row: dict[str, Any], total: int) -> str:
+    index = int(row.get("index") or 0)
+    title = " ".join(str(row.get("source_title") or "").split())[:80]
+    error = " ".join(str(row.get("error") or row.get("visit_error") or "").split())[:160]
+    return (
+        f"[fetch {index}/{total}] "
+        f"ok={row.get('ok')} usable={row.get('usable')} "
+        f"quality={row.get('source_quality') or '-'} "
+        f"method={row.get('extraction_method') or '-'} "
+        f"text_chars={row.get('text_chars') or 0} "
+        f"raw_chars={row.get('raw_text_chars') or 0} "
+        f"status={row.get('status') or '-'} "
+        f"domain={row.get('domain') or '-'} "
+        f"title={title!r} "
+        f"error={error!r}"
+    )
+
+
 def progress_as_completed(tasks: list[asyncio.Task[Any]], desc: str) -> Any:
     try:
         from tqdm import tqdm
@@ -374,6 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-concurrent-url-fetches", type=int, default=16)
     parser.add_argument("--min-extracted-chars", type=int, default=500)
     parser.add_argument("--max-urls", type=int, default=0)
+    parser.add_argument("--quiet-fetch-rows", action="store_true")
     return parser
 
 
