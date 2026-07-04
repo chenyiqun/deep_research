@@ -188,6 +188,23 @@ bash scripts/launch_visit_server_bg.sh
 
 This does not call DeepSeek or paid Jina. It uses the same local vLLM server as the report generator to compress each fetched URL into a goal-based visit summary before the reader agent consumes it.
 
+To test URL extraction quality without running the full research workflow:
+
+```bash
+WEB_SEARCH_API_KEY=your_key \
+PYTHONPATH="$PWD" python scripts/test_search_url_fetch.py \
+  --query-file /mnt/tidal-alsh01/usr/chenyiqun/datasets/DeepResearch/deep_research_bench_data/query.jsonl \
+  --query-limit 5 \
+  --only-lang zh \
+  --search-count 15 \
+  --search-top-k 8 \
+  --url-visit-endpoint http://127.0.0.1:8765/visit \
+  --url-fetch-cache-dir outputs/search_url_fetch_test/url_cache \
+  --output-file outputs/search_url_fetch_test/url_fetch_results.jsonl \
+  --search-results-file outputs/search_url_fetch_test/search_results.jsonl \
+  --summary-file outputs/search_url_fetch_test/summary.json
+```
+
 Use fewer GPUs by changing both `GPU_DEVICES` and `TENSOR_PARALLEL_SIZE`:
 
 ```bash
