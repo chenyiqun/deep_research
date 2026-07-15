@@ -137,7 +137,7 @@ def main() -> None:
     assert not is_probably_pdf("https://example.com/article.html", "text/html")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"
     assert normalize_visit_endpoint("http://localhost:8765/visit") == "http://localhost:8765/visit"
-    assert DEFAULT_SEARCH_ENGINE == "search_live"
+    assert DEFAULT_SEARCH_ENGINE == "search_prime"
     assert set(SUPPORTED_SEARCH_ENGINES) == {
         "search_pro_jina",
         "search_prime",

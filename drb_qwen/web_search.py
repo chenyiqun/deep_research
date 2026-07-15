@@ -6,7 +6,7 @@ from typing import Any
 
 
 PROD_WEB_SEARCH_ENDPOINT = "http://edithai.devops.xiaohongshu.com/ext-tools/zhipu-web-search-vip"
-DEFAULT_SEARCH_ENGINE = "search_live"
+DEFAULT_SEARCH_ENGINE = "search_prime"
 
 
 @dataclass(frozen=True)

@@ -1351,7 +1351,7 @@ Main Agent 提交状态 patch 时必须比较 state_version。版本过期则重
 
 系统支持六个搜索工具标识：Jina=`search_pro_jina`、Google=`search_prime`、
 Bing=`search_pro_ms`、Sogou=`search_live`、Quark=`search_lite`、Baidu=`search_plus`。
-默认使用 Sogou。工具适配层不仅透传名字，还记录 provider、content kind 和默认 URL fetch 策略。
+当前部署默认使用已验证可用的 Google (`search_prime`)；工具适配层仍兼容全部逻辑引擎，并记录 provider、content kind 和默认 URL fetch 策略。
 
 - `auto`：`search_live` 的返回内容直接进入 Reader；其余引擎抓取结果 URL 后再进入 Reader。
 - `always`：无论引擎都二次抓取，适合强制使用 Visit/Crawl4AI。
