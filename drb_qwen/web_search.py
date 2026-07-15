@@ -6,13 +6,66 @@ from typing import Any
 
 
 PROD_WEB_SEARCH_ENDPOINT = "http://edithai.devops.xiaohongshu.com/ext-tools/zhipu-web-search-vip"
+DEFAULT_SEARCH_ENGINE = "search_live"
+
+
+@dataclass(frozen=True)
+class SearchEngineProfile:
+    key: str
+    provider: str
+    native_content: bool
+    fetch_pages_by_default: bool
+
+    @property
+    def result_source_quality(self) -> str:
+        return "search_native_content" if self.native_content else "search_snippet"
+
+    @property
+    def result_extraction_method(self) -> str:
+        return f"{self.key}_content" if self.native_content else "search_snippet"
+
+
+# `search_live` returns reader-ready Sogou result content. The other engines
+# are treated as discovery/snippet providers in auto mode and therefore use
+# the URL fetcher. Callers can override this with --url-fetch-mode.
+SEARCH_ENGINE_PROFILES: dict[str, SearchEngineProfile] = {
+    "search_pro_jina": SearchEngineProfile("search_pro_jina", "jina", False, True),
+    "search_prime": SearchEngineProfile("search_prime", "google", False, True),
+    "search_pro_ms": SearchEngineProfile("search_pro_ms", "bing", False, True),
+    "search_live": SearchEngineProfile("search_live", "sogou", True, False),
+    "search_lite": SearchEngineProfile("search_lite", "quark", False, True),
+    "search_plus": SearchEngineProfile("search_plus", "baidu", False, True),
+}
+SUPPORTED_SEARCH_ENGINES = tuple(SEARCH_ENGINE_PROFILES)
+URL_FETCH_MODES = ("auto", "always", "never")
+
+
+def get_search_engine_profile(search_engine: str) -> SearchEngineProfile:
+    key = str(search_engine or DEFAULT_SEARCH_ENGINE).strip().lower()
+    try:
+        return SEARCH_ENGINE_PROFILES[key]
+    except KeyError as exc:
+        supported = ", ".join(SUPPORTED_SEARCH_ENGINES)
+        raise ValueError(f"Unsupported search engine {search_engine!r}. Choose one of: {supported}") from exc
+
+
+def should_fetch_result_pages(search_engine: str, mode: str = "auto") -> bool:
+    profile = get_search_engine_profile(search_engine)
+    normalized_mode = str(mode or "auto").strip().lower()
+    if normalized_mode not in URL_FETCH_MODES:
+        raise ValueError(f"Unsupported URL fetch mode {mode!r}. Choose one of: {', '.join(URL_FETCH_MODES)}")
+    if normalized_mode == "always":
+        return True
+    if normalized_mode == "never":
+        return False
+    return profile.fetch_pages_by_default
 
 
 @dataclass
 class WebSearchConfig:
     endpoint: str = PROD_WEB_SEARCH_ENDPOINT
     access_key: str = ""
-    search_engine: str = "search_prime"
+    search_engine: str = DEFAULT_SEARCH_ENGINE
     count: int = 15
     search_domain_filter: str = ""
     search_recency_filter: str = "noLimit"
@@ -23,6 +76,7 @@ class WebSearchConfig:
     retry_sleep_s: float = 1.5
 
     def __post_init__(self) -> None:
+        self.search_engine = get_search_engine_profile(self.search_engine).key
         positive = {
             "count": self.count,
             "timeout_s": self.timeout_s,
@@ -46,6 +100,8 @@ class SearchResult:
     refer: str = ""
     publish_date: str = ""
     search_query: str = ""
+    search_engine: str = ""
+    content_kind: str = ""
     source_quality: str = ""
     extraction_method: str = ""
 
@@ -112,7 +168,11 @@ class WebSearchClient:
                                 f"web search failed with HTTP {response.status}: {text[:1000]}"
                             )
                         data = await response.json()
-                        return parse_search_results(data, query)[:top_k]
+                        return parse_search_results(
+                            data,
+                            query,
+                            search_engine=self.config.search_engine,
+                        )[:top_k]
                 except Exception as exc:
                     last_error = exc
                     if attempt >= self.config.max_retries:
@@ -121,19 +181,22 @@ class WebSearchClient:
             raise RuntimeError(f"web search failed after retries: {last_error}") from last_error
 
 
-def parse_search_results(data: dict[str, Any], query: str) -> list[SearchResult]:
+def parse_search_results(
+    data: Any,
+    query: str,
+    search_engine: str = DEFAULT_SEARCH_ENGINE,
+) -> list[SearchResult]:
     results: list[SearchResult] = []
-    raw_results = data.get("search_result", [])
-    if not isinstance(raw_results, list):
-        return results
+    profile = get_search_engine_profile(search_engine)
+    raw_results = find_raw_results(data)
 
     seen_links: set[str] = set()
     for item in raw_results:
         if not isinstance(item, dict):
             continue
-        link = str(item.get("link", "")).strip()
-        title = str(item.get("title", "")).strip()
-        content = str(item.get("content", "")).strip()
+        link = first_text(item, "link", "url", "source_url", "href")
+        title = first_text(item, "title", "name", "source_title")
+        content = first_text(item, "content", "text", "snippet", "summary", "description")
         if not link and not content:
             continue
         dedupe_key = link or f"{title}:{content[:120]}"
@@ -145,11 +208,45 @@ def parse_search_results(data: dict[str, Any], query: str) -> list[SearchResult]
                 title=title,
                 content=content,
                 link=link,
-                media=str(item.get("media", "")).strip(),
-                icon=str(item.get("icon", "")).strip(),
-                refer=str(item.get("refer", "")).strip(),
-                publish_date=str(item.get("publish_date", "")).strip(),
+                media=first_text(item, "media", "site_name", "source"),
+                icon=first_text(item, "icon", "favicon"),
+                refer=first_text(item, "refer", "reference"),
+                publish_date=first_text(item, "publish_date", "published_at", "date", "time"),
                 search_query=query,
+                search_engine=profile.key,
+                content_kind="native_content" if profile.native_content else "snippet",
+                source_quality=profile.result_source_quality,
+                extraction_method=profile.result_extraction_method,
             )
         )
     return results
+
+
+def find_raw_results(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("search_result", "search_results", "results", "result", "items"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested_results = find_raw_results(value)
+            if nested_results:
+                return nested_results
+    nested = data.get("data")
+    if nested is not data:
+        return find_raw_results(nested)
+    return []
+
+
+def first_text(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""

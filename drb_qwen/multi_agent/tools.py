@@ -271,7 +271,7 @@ class ResearchTools:
         subtask: SubTask,
         result: SearchResult,
     ) -> tuple[SourceRecord, str, dict[str, Any]]:
-        fetch_result = URLFetchResult(url=result.link, ok=False, error="fetch disabled")
+        fetch_result = URLFetchResult(url=result.link, ok=False)
         url_allowed, url_error = validate_external_url(result.link)
         attempted = bool(
             self.fetch_full_content and self.content_fetcher is not None and result.link and url_allowed
@@ -293,8 +293,16 @@ class ResearchTools:
             )
         else:
             source_text = str(result.content or "").strip()[: self.source_content_max_chars]
-        quality = source_quality(fetch_result, used_full_text)
-        extraction_method = fetch_result.extraction_method if used_full_text else "search_snippet"
+        quality = source_quality(
+            fetch_result,
+            used_full_text,
+            fallback_quality=result.source_quality,
+        )
+        extraction_method = (
+            fetch_result.extraction_method
+            if used_full_text
+            else (result.extraction_method or "search_snippet")
+        )
         source_id = stable_id("src", result.link or result.title, result.publish_date)
         artifact_id = stable_id("art", run_id, source_id, content_hash(full_text or source_text))
         artifact_text = full_text if used_full_text else source_text
@@ -307,6 +315,8 @@ class ResearchTools:
                 "source_title": result.title,
                 "subtask_id": subtask.id,
                 "query": result.search_query,
+                "search_engine": result.search_engine,
+                "content_kind": result.content_kind,
                 "source_quality": quality,
             },
         )
@@ -328,6 +338,8 @@ class ResearchTools:
             {
                 "attempted": attempted,
                 "used_full_content": used_full_text,
+                "search_engine": result.search_engine,
+                "content_kind": result.content_kind,
                 "source_quality": quality,
                 "reader_content_chars": len(source_text),
                 "artifact_id": source.artifact_id,
@@ -383,7 +395,11 @@ class ResearchTools:
         return {"claims": [], "__token_usage__": usage}
 
 
-def source_quality(fetch: URLFetchResult, used_full_text: bool) -> str:
+def source_quality(
+    fetch: URLFetchResult,
+    used_full_text: bool,
+    fallback_quality: str = "",
+) -> str:
     if used_full_text:
         method = str(fetch.extraction_method or "")
         if "goal_summary" in method:
@@ -393,16 +409,18 @@ def source_quality(fetch: URLFetchResult, used_full_text: bool) -> str:
         if fetch.source == "visit_server":
             return "full_text_visit"
         return "full_text"
+    if fallback_quality == "search_native_content":
+        return fallback_quality
     if fetch.error and fetch.error != "fetch disabled":
         return "fetch_failed"
-    return "snippet_only"
+    return fallback_quality or "snippet_only"
 
 
 def normalize_confidence(value: Any, quality: str) -> str:
     confidence = str(value or "medium").lower()
     if confidence not in {"high", "medium", "low"}:
         confidence = "medium"
-    if quality in {"snippet_only", "fetch_failed"} and confidence == "high":
+    if quality in {"snippet_only", "search_snippet", "fetch_failed"} and confidence == "high":
         return "medium"
     return confidence
 

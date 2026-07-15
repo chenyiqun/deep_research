@@ -183,7 +183,8 @@ VLLM_BASE_URL=http://127.0.0.1:8000/v1 \
 VLLM_MODEL=qwen3-32b \
 MAX_CONCURRENT_TASKS=4 \
 MAX_CONCURRENT_LLM_CALLS=16 \
-URL_FETCH_ENABLED=1 \
+SEARCH_ENGINE=search_live \
+URL_FETCH_MODE=auto \
 URL_VISIT_ENDPOINT= \
 MAX_CONCURRENT_URL_FETCHES=16 \
 URL_FETCH_TIMEOUT_S=30 \
@@ -221,7 +222,8 @@ python -m drb_qwen.run_multi_agent_research \
   --llm-base-url http://127.0.0.1:8000/v1 \
   --llm-model qwen3-32b \
   --tokenizer-path /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-32B \
-  --url-visit-endpoint http://127.0.0.1:8765/visit
+  --search-engine search_live \
+  --url-fetch-mode auto
 ```
 
 The command writes `report.md`, `result.json`, URL cache data, and durable run
@@ -240,9 +242,24 @@ Important runtime controls include:
 - `--forward-vllm-priority`: forward Main/Researcher/Reader/Writer priority to a vLLM server started with priority scheduling.
 - `--disable-structured-outputs`: compatibility escape hatch for older vLLM; the normal path uses JSON Schema.
 
-`URL_FETCH_ENABLED=1` makes the workflow fetch each top-k search result URL and feed the reader the extracted page text. If fetching fails or the extracted text is too short, the reader falls back to the web-search snippet and records the fetch status in `traces/<id>.json`.
+The search endpoint supports six engines:
 
-If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. The workflow will call `POST /visit` with `{"url": ..., "goal": ...}` first, then fall back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`.
+| Engine | Provider | `--url-fetch-mode auto` behavior |
+| --- | --- | --- |
+| `search_pro_jina` | Jina | fetch result pages |
+| `search_prime` | Google | fetch result pages |
+| `search_pro_ms` | Bing | fetch result pages |
+| `search_live` | Sogou | use returned search content directly |
+| `search_lite` | Quark | fetch result pages |
+| `search_plus` | Baidu | fetch result pages |
+
+`search_live` is the default. Its returned content is sent directly to the Reader and recorded as
+`search_native_content`; the workflow does not create a URL fetcher or charge fetch-tool budget in auto mode.
+For the other engines, auto mode fetches each top-k URL and falls back to the search snippet if extraction
+fails. Use `--url-fetch-mode always` to force page fetching or `--url-fetch-mode never` to disable it.
+The legacy `--disable-url-fetch` and `URL_FETCH_ENABLED` controls remain compatible.
+
+If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. When URL fetching is enabled by the selected engine/mode, the workflow calls `POST /visit` with `{"url": ..., "goal": ...}` first, then falls back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`. With the default `search_live + auto` combination the visit service is not called; use `URL_FETCH_MODE=always` to force it.
 
 For the no-paid best-effort path, run the bundled visit server with crawl4ai-first HTML extraction, local PDF extraction, and local Qwen/vLLM goal summaries:
 

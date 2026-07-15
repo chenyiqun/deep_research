@@ -10,6 +10,13 @@ from drb_qwen.url_fetcher import (
     should_try_fetch_url,
 )
 from drb_qwen.visit_server import VisitService, is_probably_pdf
+from drb_qwen.web_search import (
+    DEFAULT_SEARCH_ENGINE,
+    SUPPORTED_SEARCH_ENGINES,
+    WebSearchConfig,
+    parse_search_results,
+    should_fetch_result_pages,
+)
 
 
 async def assert_visit_service_rejects_unsafe_urls() -> None:
@@ -68,6 +75,49 @@ def main() -> None:
     assert not is_probably_pdf("https://example.com/article.html", "text/html")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"
     assert normalize_visit_endpoint("http://localhost:8765/visit") == "http://localhost:8765/visit"
+    assert DEFAULT_SEARCH_ENGINE == "search_live"
+    assert set(SUPPORTED_SEARCH_ENGINES) == {
+        "search_pro_jina",
+        "search_prime",
+        "search_pro_ms",
+        "search_live",
+        "search_lite",
+        "search_plus",
+    }
+    for engine in SUPPORTED_SEARCH_ENGINES:
+        assert WebSearchConfig(search_engine=engine).search_engine == engine
+    assert should_fetch_result_pages("search_live", "auto") is False
+    assert should_fetch_result_pages("search_prime", "auto") is True
+    assert should_fetch_result_pages("search_live", "always") is True
+    assert should_fetch_result_pages("search_prime", "never") is False
+    parsed = parse_search_results(
+        {
+            "data": {
+                "results": [
+                    {
+                        "name": "Sogou result",
+                        "summary": "Reader-ready result content.",
+                        "url": "https://example.com/sogou",
+                        "published_at": "2026-07-16",
+                    }
+                ]
+            }
+        },
+        "test query",
+        search_engine="search_live",
+    )
+    assert len(parsed) == 1
+    assert parsed[0].search_engine == "search_live"
+    assert parsed[0].content_kind == "native_content"
+    assert parsed[0].source_quality == "search_native_content"
+    assert parsed[0].extraction_method == "search_live_content"
+    assert parsed[0].link == "https://example.com/sogou"
+    try:
+        WebSearchConfig(search_engine="unknown")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown search engines must fail before an API request")
     asyncio.run(assert_visit_service_rejects_unsafe_urls())
     print("smoke_test_url_fetcher passed")
 

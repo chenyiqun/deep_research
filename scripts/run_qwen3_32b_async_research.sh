@@ -9,6 +9,7 @@ VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000/v1}"
 VLLM_MODEL="${VLLM_MODEL:-qwen3-32b}"
 VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
 WEB_SEARCH_ENDPOINT="${WEB_SEARCH_ENDPOINT:-http://edithai.devops.xiaohongshu.com/ext-tools/zhipu-web-search-vip}"
+SEARCH_ENGINE="${SEARCH_ENGINE:-search_live}"
 MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-4}"
 MAX_CONCURRENT_LLM_CALLS="${MAX_CONCURRENT_LLM_CALLS:-16}"
 MAX_CONCURRENT_CONTROL_CALLS="${MAX_CONCURRENT_CONTROL_CALLS:-8}"
@@ -22,7 +23,8 @@ FORWARD_VLLM_PRIORITY="${FORWARD_VLLM_PRIORITY:-1}"
 STRUCTURED_OUTPUTS_ENABLED="${STRUCTURED_OUTPUTS_ENABLED:-1}"
 MAX_CONCURRENT_SEARCHES="${MAX_CONCURRENT_SEARCHES:-8}"
 MAX_CONCURRENT_READERS="${MAX_CONCURRENT_READERS:-12}"
-URL_FETCH_ENABLED="${URL_FETCH_ENABLED:-1}"
+URL_FETCH_MODE="${URL_FETCH_MODE:-auto}"
+URL_FETCH_ENABLED="${URL_FETCH_ENABLED:-}"
 URL_VISIT_ENDPOINT="${URL_VISIT_ENDPOINT:-}"
 URL_VISIT_TIMEOUT_S="${URL_VISIT_TIMEOUT_S:-60}"
 URL_VISIT_FALLBACK_ENABLED="${URL_VISIT_FALLBACK_ENABLED:-1}"
@@ -66,6 +68,29 @@ LOG_DIR="${LOG_DIR:-${OUT_DIR}/logs}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/run_${RUN_ID}.log}"
 
+case "${URL_FETCH_MODE}" in
+  auto|always|never)
+    ;;
+  *)
+    echo "ERROR: URL_FETCH_MODE must be auto, always, or never; got ${URL_FETCH_MODE}"
+    exit 2
+    ;;
+esac
+if [[ -n "${URL_FETCH_ENABLED}" ]]; then
+  case "${URL_FETCH_ENABLED}" in
+    0|false|False|FALSE|no|No|NO)
+      URL_FETCH_MODE="never"
+      ;;
+    1|true|True|TRUE|yes|Yes|YES)
+      URL_FETCH_MODE="always"
+      ;;
+    *)
+      echo "ERROR: legacy URL_FETCH_ENABLED must be a boolean; got ${URL_FETCH_ENABLED}"
+      exit 2
+      ;;
+  esac
+fi
+
 cd "${REPO_DIR}"
 mkdir -p "${OUT_DIR}" "${LOG_DIR}" "${OUT_DIR}/traces"
 
@@ -86,6 +111,7 @@ echo "Limit: ${LIMIT}"
 echo "vLLM base URL: ${VLLM_BASE_URL}"
 echo "vLLM model: ${VLLM_MODEL}"
 echo "Web search endpoint: ${WEB_SEARCH_ENDPOINT}"
+echo "Search engine: ${SEARCH_ENGINE}"
 echo "Max concurrent tasks: ${MAX_CONCURRENT_TASKS}"
 echo "Max concurrent LLM calls: ${MAX_CONCURRENT_LLM_CALLS}"
 echo "Max concurrent control calls: ${MAX_CONCURRENT_CONTROL_CALLS}"
@@ -93,7 +119,7 @@ echo "Max concurrent long-output calls: ${MAX_CONCURRENT_LONG_CALLS}"
 echo "Max in-flight LLM tokens: ${MAX_INFLIGHT_LLM_TOKENS}"
 echo "Model context length: ${MAX_MODEL_LEN}"
 echo "Tokenizer path: ${TOKENIZER_PATH:-conservative estimator}"
-echo "URL fetch enabled: ${URL_FETCH_ENABLED}"
+echo "URL fetch mode: ${URL_FETCH_MODE}"
 echo "URL visit endpoint: ${URL_VISIT_ENDPOINT}"
 echo "Max concurrent URL fetches: ${MAX_CONCURRENT_URL_FETCHES}"
 echo "URL fetch timeout seconds: ${URL_FETCH_TIMEOUT_S}"
@@ -137,11 +163,7 @@ REPORT_FILE="${OUT_DIR}/qwen3_32b_async_research_reports.jsonl"
 
 URL_FETCH_ARGS=()
 INFERENCE_ARGS=()
-case "${URL_FETCH_ENABLED}" in
-  0|false|False|FALSE|no|No|NO)
-    URL_FETCH_ARGS+=(--disable-url-fetch)
-    ;;
-esac
+URL_FETCH_ARGS+=(--url-fetch-mode "${URL_FETCH_MODE}")
 if [[ -n "${URL_VISIT_ENDPOINT}" ]]; then
   URL_FETCH_ARGS+=(--url-visit-endpoint "${URL_VISIT_ENDPOINT}")
   URL_FETCH_ARGS+=(--url-visit-timeout-s "${URL_VISIT_TIMEOUT_S}")
@@ -188,6 +210,7 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --context-safety-tokens "${CONTEXT_SAFETY_TOKENS}" \
   --tokenizer-path "${TOKENIZER_PATH}" \
   --web-search-endpoint "${WEB_SEARCH_ENDPOINT}" \
+  --search-engine "${SEARCH_ENGINE}" \
   --search-count "${SEARCH_COUNT}" \
   --search-top-k "${SEARCH_TOP_K}" \
   --max-concurrent-searches "${MAX_CONCURRENT_SEARCHES}" \

@@ -13,7 +13,14 @@ from urllib.parse import urlparse
 
 from drb_qwen.io_utils import load_jsonl, write_jsonl, write_text
 from drb_qwen.url_fetcher import URLContentFetcher, URLFetchConfig, URLFetchResult, should_try_fetch_url
-from drb_qwen.web_search import PROD_WEB_SEARCH_ENDPOINT, SearchResult, WebSearchClient, WebSearchConfig
+from drb_qwen.web_search import (
+    DEFAULT_SEARCH_ENGINE,
+    PROD_WEB_SEARCH_ENDPOINT,
+    SUPPORTED_SEARCH_ENGINES,
+    SearchResult,
+    WebSearchClient,
+    WebSearchConfig,
+)
 
 
 def main() -> None:
@@ -57,6 +64,7 @@ async def run_async(args: argparse.Namespace) -> None:
 
     print(f"Queries: {len(query_rows)}")
     print(f"Web search endpoint: {args.web_search_endpoint}")
+    print(f"Search engine: {args.search_engine}")
     print(f"Search count: {args.search_count}")
     print(f"Search top-k: {args.search_top_k}")
     print(f"URL visit endpoint: {args.url_visit_endpoint or '<none>'}")
@@ -379,7 +387,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--web-search-endpoint", default=PROD_WEB_SEARCH_ENDPOINT)
     parser.add_argument("--web-search-api-key", default="")
-    parser.add_argument("--search-engine", default="search_prime")
+    parser.add_argument(
+        "--search-engine",
+        default=DEFAULT_SEARCH_ENGINE,
+        choices=SUPPORTED_SEARCH_ENGINES,
+    )
     parser.add_argument("--search-count", type=int, default=15)
     parser.add_argument("--search-top-k", type=int, default=8)
     parser.add_argument("--search-domain-filter", default="")

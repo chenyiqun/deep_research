@@ -12,7 +12,15 @@ from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
 from .io_utils import write_text
 from .url_fetcher import URLContentFetcher, URLFetchConfig
-from .web_search import PROD_WEB_SEARCH_ENDPOINT, WebSearchClient, WebSearchConfig
+from .web_search import (
+    DEFAULT_SEARCH_ENGINE,
+    PROD_WEB_SEARCH_ENDPOINT,
+    SUPPORTED_SEARCH_ENGINES,
+    URL_FETCH_MODES,
+    WebSearchClient,
+    WebSearchConfig,
+    should_fetch_result_pages,
+)
 
 
 async def run_async(args: argparse.Namespace) -> dict[str, Any]:
@@ -49,6 +57,8 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
         max_concurrent_requests=args.max_concurrent_searches,
         max_retries=args.search_max_retries,
     )
+    url_fetch_mode = "never" if args.disable_url_fetch else args.url_fetch_mode
+    fetch_full_content = should_fetch_result_pages(search_config.search_engine, url_fetch_mode)
     fetch_config = URLFetchConfig(
         timeout_s=args.url_fetch_timeout_s,
         visit_endpoint=args.url_visit_endpoint,
@@ -74,7 +84,7 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
         max_total_tokens=args.max_total_tokens,
         max_run_seconds=args.max_run_seconds,
         search_top_k=args.search_top_k,
-        fetch_full_content=not args.disable_url_fetch,
+        fetch_full_content=fetch_full_content,
         min_fetched_content_chars=args.min_fetched_content_chars,
         max_concurrent_readers=args.max_concurrent_readers,
         min_total_claims=args.min_total_claims,
@@ -108,7 +118,7 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
         llm = await stack.enter_async_context(AsyncChatClient(llm_config))
         search_client = await stack.enter_async_context(WebSearchClient(search_config))
         fetcher = None
-        if not args.disable_url_fetch:
+        if fetch_full_content:
             fetcher = await stack.enter_async_context(URLContentFetcher(fetch_config))
         workflow = AsyncDeepResearchWorkflow(
             llm=llm,
@@ -132,6 +142,9 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
                 "claims": len(result["state"]["claims"]),
                 "evidence": len(result["state"]["evidence"]),
                 "audit_passed": bool((result.get("audit") or {}).get("passed")),
+                "search_engine": search_config.search_engine,
+                "url_fetch_mode": url_fetch_mode,
+                "url_fetch_enabled": fetch_full_content,
                 "report_file": str(output_dir / "report.md"),
                 "result_file": str(output_dir / "result.json"),
             },
@@ -163,7 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--web-search-endpoint", default=PROD_WEB_SEARCH_ENDPOINT)
     parser.add_argument("--web-search-api-key-env", default="WEB_SEARCH_API_KEY")
     parser.add_argument("--web-search-api-key", default=None)
-    parser.add_argument("--search-engine", default="search_prime")
+    parser.add_argument(
+        "--search-engine",
+        default=DEFAULT_SEARCH_ENGINE,
+        choices=SUPPORTED_SEARCH_ENGINES,
+    )
     parser.add_argument("--search-count", type=int, default=15)
     parser.add_argument("--search-top-k", type=int, default=5)
     parser.add_argument("--search-recency-filter", default="noLimit")
@@ -171,7 +188,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--search-max-retries", type=int, default=3)
     parser.add_argument("--max-concurrent-searches", type=int, default=8)
 
-    parser.add_argument("--disable-url-fetch", action="store_true")
+    parser.add_argument(
+        "--url-fetch-mode",
+        default="auto",
+        choices=URL_FETCH_MODES,
+        help="auto follows the search-engine profile; search_live skips page fetching by default.",
+    )
+    parser.add_argument(
+        "--disable-url-fetch",
+        action="store_true",
+        help="Deprecated alias for --url-fetch-mode never.",
+    )
     parser.add_argument("--url-visit-endpoint", default="")
     parser.add_argument("--url-visit-timeout-s", type=int, default=60)
     parser.add_argument("--disable-url-visit-fallback", action="store_true")

@@ -25,7 +25,8 @@ from drb_qwen.multi_agent.schemas import (
 )
 from drb_qwen.multi_agent.security import source_independence_group, validate_external_url
 from drb_qwen.multi_agent.store import RunStore
-from drb_qwen.multi_agent.tools import excerpt_is_grounded
+from drb_qwen.multi_agent.tools import excerpt_is_grounded, normalize_confidence, source_quality
+from drb_qwen.url_fetcher import URLFetchResult
 
 
 def main() -> None:
@@ -122,6 +123,10 @@ def main() -> None:
 
     assert excerpt_is_grounded("Quoted   evidence.", "Before quoted evidence. After")
     assert not excerpt_is_grounded("invented evidence", "The source says something else.")
+    no_fetch = URLFetchResult(url="https://example.com/sogou", ok=False)
+    assert source_quality(no_fetch, False, "search_native_content") == "search_native_content"
+    assert normalize_confidence("high", "search_native_content") == "high"
+    assert normalize_confidence("high", "search_snippet") == "medium"
 
     integrity_state = GlobalResearchState(run_id="integrity", task={"prompt": "integrity"})
     integrity_state.tasks["st"] = SubTask(id="st", objective="verify")

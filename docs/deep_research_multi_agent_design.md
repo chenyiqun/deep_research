@@ -1347,6 +1347,20 @@ Main Agent 提交状态 patch 时必须比较 state_version。版本过期则重
 
 来源类型要服从问题类型。例如研究用户体验时，论坛是一手用户材料；研究产品规格时，论坛不是权威规格来源。
 
+#### 8.1.1 搜索引擎与内容获取策略
+
+系统支持六个搜索工具标识：Jina=`search_pro_jina`、Google=`search_prime`、
+Bing=`search_pro_ms`、Sogou=`search_live`、Quark=`search_lite`、Baidu=`search_plus`。
+默认使用 Sogou。工具适配层不仅透传名字，还记录 provider、content kind 和默认 URL fetch 策略。
+
+- `auto`：`search_live` 的返回内容直接进入 Reader；其余引擎抓取结果 URL 后再进入 Reader。
+- `always`：无论引擎都二次抓取，适合强制使用 Visit/Crawl4AI。
+- `never`：无论引擎都只使用搜索接口返回内容。
+
+Sogou 原生结果标记为 `search_native_content`，普通搜索摘要标记为 `search_snippet`。
+前者不是“网页已抓取”的同义词，但可以作为 Reader 的直接输入；后者的高置信度会被规则降级。
+所有模式仍要求合法的外部来源 URL，保证 Writer 可以给出可审计引用。
+
 ### 8.2 来源质量分
 
 建议用于排序而非“证明真伪”的启发式：
