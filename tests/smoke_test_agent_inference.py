@@ -6,9 +6,14 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from drb_qwen.async_llm_client import AsyncChatConfig, AsyncChatResponse, LLMHTTPError
-from drb_qwen.multi_agent.agents import REACT_STEP_TERMINAL, ResearcherAgent
+from drb_qwen.multi_agent.agents import (
+    REACT_STEP_TERMINAL,
+    ResearcherAgent,
+    build_semantically_bounded_prompt,
+)
 from drb_qwen.multi_agent.context import ResearcherContextBuilder, TokenCounter
 from drb_qwen.multi_agent.inference import AgentInferenceConfig, AgentInferenceGateway
+from drb_qwen.multi_agent.prompts import compact_evidence_packet_json
 from drb_qwen.multi_agent.protocols import RESEARCHER_DECISION_SCHEMA
 from drb_qwen.multi_agent.schemas import (
     ClaimRecord,
@@ -63,6 +68,20 @@ class RejectAdvancedLLM:
         self.calls.append(kwargs)
         if "response_format" in kwargs:
             raise LLMHTTPError(400, "unsupported response_format")
+        return AsyncChatResponse(content="{}", usage={})
+
+
+class RejectContextOnceLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_with_usage(self, **kwargs: Any) -> AsyncChatResponse:
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            raise LLMHTTPError(
+                400,
+                "This model's maximum context length is 600 tokens; input_tokens is too large",
+            )
         return AsyncChatResponse(content="{}", usage={})
 
 
@@ -172,6 +191,61 @@ async def check_gateway() -> None:
     assert compatible.metrics.advanced_fallbacks == 1
     assert compatible._should_fallback(RuntimeError("request failed with HTTP 404"))
     assert compatible._should_fallback(RuntimeError("request failed with HTTP 405"))
+    assert not compatible._should_fallback(
+        LLMHTTPError(
+            400,
+            "This model's maximum context length is 32768 tokens; input_tokens is too large",
+        )
+    )
+
+    oversized = RecordingAdvancedLLM()
+    bounded = AgentInferenceGateway(
+        oversized,
+        config=AgentInferenceConfig(
+            max_model_len=400,
+            context_safety_tokens=50,
+            context_retry_shrink_tokens=50,
+        ),
+    )
+    bounded_response = await bounded.infer_with_usage(
+        user_prompt="x" * 5000,
+        system_prompt="system",
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=100,
+        role="writer",
+        run_id="bounded",
+    )
+    bounded_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": oversized.kwargs["user_prompt"]},
+    ]
+    assert bounded.token_counter.count_messages(bounded_messages) <= 250
+    assert bounded_response.metadata["input_truncated"] is True
+    assert bounded.metrics.context_truncations == 1
+
+    retrying_llm = RejectContextOnceLLM()
+    retrying = AgentInferenceGateway(
+        retrying_llm,
+        config=AgentInferenceConfig(
+            max_model_len=600,
+            context_safety_tokens=50,
+            context_retry_shrink_tokens=100,
+            context_retry_attempts=1,
+        ),
+    )
+    await retrying.infer_with_usage(
+        user_prompt="z" * 5000,
+        system_prompt="system",
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=100,
+        role="writer",
+        run_id="retry",
+    )
+    assert len(retrying_llm.calls) == 2
+    assert len(retrying_llm.calls[1]["user_prompt"]) < len(retrying_llm.calls[0]["user_prompt"])
+    assert retrying.metrics.context_retries == 1
 
     ordered = OrderedLLM()
     serialized = AgentInferenceGateway(
@@ -237,6 +311,54 @@ def check_context_builder() -> None:
     assert result.dropped_observations > 0
     assert "LATEST_MARKER" in result.prompt
     assert '"evidence_ids": []' in result.prompt
+
+
+def check_evidence_prompt_compaction() -> None:
+    evidence = {
+        "evidence_id": "ev",
+        "relation": "supports",
+        "excerpt": "e" * 5000,
+        "source_url": "https://example.com/source",
+        "source_title": "source",
+    }
+    packet = [
+        {
+            "claim_id": f"claim-{index}",
+            "claim": f"claim {index}",
+            "confidence": "high",
+            "status": "supported",
+            "qualifiers": [],
+            "evidence": [dict(evidence, evidence_id=f"ev-{index}")],
+            "supports": [dict(evidence, evidence_id=f"ev-{index}")],
+            "refutes": [],
+            "qualifies": [],
+        }
+        for index in range(20)
+    ]
+    rendered = compact_evidence_packet_json(packet, max_chars=5000)
+    parsed = json.loads(rendered)
+    assert isinstance(parsed, list)
+    assert len(rendered) <= 5000
+    assert '"supports":' not in rendered
+    assert "https://example.com/source" in rendered
+    assert any("omitted_claims" in item for item in parsed)
+
+    counter = TokenCounter()
+    bounded_prompt, bounded_tokens = build_semantically_bounded_prompt(
+        builder=lambda state_chars, evidence_chars: (
+            "<state>" + ("s" * state_chars) + "</state>"
+            "<evidence>" + ("e" * evidence_chars) + "</evidence>"
+        ),
+        token_counter=counter,
+        system_prompt="system",
+        max_model_len=10000,
+        max_output_tokens=1000,
+        context_safety_tokens=500,
+        state_max_chars=10000,
+        evidence_max_chars=20000,
+    )
+    assert bounded_tokens <= 8500
+    assert len(bounded_prompt) < 30000
 
 
 def check_checkpoint() -> None:
@@ -372,6 +494,7 @@ async def check_search_then_finish_is_not_completed() -> None:
 async def main_async() -> None:
     await check_gateway()
     check_context_builder()
+    check_evidence_prompt_compaction()
     check_checkpoint()
     await check_terminal_checkpoint_resume()
     await check_search_then_finish_is_not_completed()

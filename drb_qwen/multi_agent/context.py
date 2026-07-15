@@ -86,6 +86,92 @@ class PromptBuildResult:
     token_count_exact: bool = False
 
 
+@dataclass
+class PromptFitResult:
+    prompt: str
+    estimated_tokens: int
+    original_tokens: int
+    max_input_tokens: int
+    truncated: bool = False
+    dropped_chars: int = 0
+    token_count_exact: bool = False
+
+
+def fit_user_prompt_to_budget(
+    *,
+    token_counter: TokenCounter,
+    system_prompt: str,
+    user_prompt: str,
+    max_input_tokens: int,
+    original_tokens: int = 0,
+) -> PromptFitResult:
+    """Fit one stateless Agent turn into its input-token budget.
+
+    Role-specific prompt builders should compact semantic data first. This is the
+    final safety boundary: it preserves the prompt instructions at both ends and
+    removes material from the middle until the rendered chat template fits.
+    """
+
+    budget = max(1, int(max_input_tokens))
+
+    def count(prompt: str) -> int:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return token_counter.count_messages(messages)
+
+    prompt = str(user_prompt)
+    measured_original = max(0, int(original_tokens)) or count(prompt)
+    if measured_original <= budget:
+        return PromptFitResult(
+            prompt=prompt,
+            estimated_tokens=measured_original,
+            original_tokens=measured_original,
+            max_input_tokens=budget,
+            token_count_exact=token_counter.exact,
+        )
+
+    marker = "\n\n...[middle context omitted to fit the model window]...\n\n"
+    marker_tokens = count(marker)
+    if marker_tokens > budget:
+        raise ContextWindowExceeded(
+            f"System prompt and chat template need about {marker_tokens} tokens, "
+            f"exceeding the {budget}-token input budget"
+        )
+
+    # Keep most of the beginning (task, protocol, requirements) and the end
+    # (closing tags and output contract). Token counts are checked on the fully
+    # rendered messages, so this also covers chat-template overhead.
+    low = 0
+    high = len(prompt)
+    best_prompt = marker
+    best_tokens = marker_tokens
+    while low <= high:
+        kept_chars = (low + high) // 2
+        head_chars = int(kept_chars * 0.8)
+        tail_chars = kept_chars - head_chars
+        tail = prompt[-tail_chars:] if tail_chars else ""
+        candidate = prompt[:head_chars] + marker + tail
+        candidate_tokens = count(candidate)
+        if candidate_tokens <= budget:
+            best_prompt = candidate
+            best_tokens = candidate_tokens
+            low = kept_chars + 1
+        else:
+            high = kept_chars - 1
+
+    return PromptFitResult(
+        prompt=best_prompt,
+        estimated_tokens=best_tokens,
+        original_tokens=measured_original,
+        max_input_tokens=budget,
+        truncated=True,
+        dropped_chars=max(0, len(prompt) - (len(best_prompt) - len(marker))),
+        token_count_exact=token_counter.exact,
+    )
+
+
 class ResearcherContextBuilder:
     """Builds the next stateless Researcher input from durable semantic state."""
 

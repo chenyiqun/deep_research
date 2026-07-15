@@ -113,6 +113,8 @@ class DeepResearchConfig:
             "state_updater_max_tokens",
             "report_max_tokens",
             "source_content_max_chars",
+            "state_prompt_max_chars",
+            "evidence_prompt_max_chars",
             "max_initial_tasks",
             "max_researchers",
             "max_subtasks",
@@ -144,8 +146,24 @@ class DeepResearchConfig:
             raise ValueError("max_initial_tasks cannot exceed max_subtasks")
         if self.min_rounds > self.max_rounds:
             raise ValueError("min_rounds cannot exceed max_rounds")
-        if self.summarizer_max_tokens + self.context_safety_tokens >= self.max_model_len:
-            raise ValueError("Researcher output and safety budgets must leave room for model input")
+        output_budgets = {
+            "planner": self.planner_max_tokens,
+            "reader": self.reader_max_tokens,
+            "researcher": self.summarizer_max_tokens,
+            "state_updater": self.state_updater_max_tokens,
+            "writer": self.report_max_tokens,
+            "auditor": self.auditor_max_tokens,
+        }
+        invalid_windows = [
+            role
+            for role, output_tokens in output_budgets.items()
+            if output_tokens + self.context_safety_tokens >= self.max_model_len
+        ]
+        if invalid_windows:
+            raise ValueError(
+                "Output and safety budgets must leave room for model input: "
+                + ", ".join(invalid_windows)
+            )
 
 
 class AsyncDeepResearchWorkflow:
@@ -177,6 +195,8 @@ class AsyncDeepResearchWorkflow:
                     structured_outputs=self.config.inference_structured_outputs,
                     forward_priority=self.config.inference_forward_priority,
                     disable_thinking_for_json=self.config.inference_disable_thinking_for_json,
+                    max_model_len=self.config.max_model_len,
+                    context_safety_tokens=self.config.context_safety_tokens,
                 ),
                 token_counter=token_counter,
             )
@@ -224,11 +244,21 @@ class AsyncDeepResearchWorkflow:
             llm=self.llm,
             max_tokens=self.config.report_max_tokens,
             temperature=self.config.temperature_report,
+            state_prompt_max_chars=self.config.state_prompt_max_chars,
+            evidence_prompt_max_chars=self.config.evidence_prompt_max_chars,
+            token_counter=token_counter,
+            max_model_len=self.config.max_model_len,
+            context_safety_tokens=self.config.context_safety_tokens,
         )
         self.auditor = CitationAuditor(
             llm=self.llm,
             max_tokens=self.config.auditor_max_tokens,
             max_repair_tasks=self.config.max_repair_tasks,
+            state_prompt_max_chars=self.config.state_prompt_max_chars,
+            evidence_prompt_max_chars=self.config.evidence_prompt_max_chars,
+            token_counter=token_counter,
+            max_model_len=self.config.max_model_len,
+            context_safety_tokens=self.config.context_safety_tokens,
         )
 
     async def run(
@@ -285,7 +315,12 @@ class AsyncDeepResearchWorkflow:
                     continue
 
                 if state.phase == RunPhase.WRITING:
-                    state.article, evidence_packet, writer_usage = await self.writer.write(state)
+                    (
+                        state.article,
+                        evidence_packet,
+                        writer_usage,
+                        writer_used_fallback,
+                    ) = await self.writer.write(state)
                     if self._sync_cancelled(state):
                         break
                     state.budget.writer_calls += 1
@@ -313,6 +348,7 @@ class AsyncDeepResearchWorkflow:
                         {
                             "article_chars": len(state.article),
                             "evidence_packet_items": len(evidence_packet),
+                            "used_fallback": writer_used_fallback,
                             "artifact_id": draft_artifact_id,
                             "next_phase": state.phase.value,
                         },
@@ -614,7 +650,7 @@ class AsyncDeepResearchWorkflow:
     async def _audit_phase(self, state: GlobalResearchState, trace: list[dict[str, Any]]) -> None:
         evidence_packet = self._evidence_packet_for_audit(state)
         state.audit_round += 1
-        audit, _, auditor_usage = await self.auditor.audit(state, evidence_packet)
+        audit, audit_response, auditor_usage = await self.auditor.audit(state, evidence_packet)
         if self._sync_cancelled(state):
             return
         state.audit = audit
@@ -630,6 +666,7 @@ class AsyncDeepResearchWorkflow:
                 "passed": audit.passed,
                 "issues": audit.issues,
                 "repair_tasks": audit.repair_tasks,
+                "used_fallback": not bool(str(audit_response or "").strip()),
             },
         )
         if audit.passed:

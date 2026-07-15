@@ -263,8 +263,19 @@ Return JSON only:
 """.strip()
 
 
-def build_writer_prompt(state: GlobalResearchState, evidence_packet: list[dict[str, Any]]) -> str:
+def build_writer_prompt(
+    state: GlobalResearchState,
+    evidence_packet: list[dict[str, Any]],
+    *,
+    state_max_chars: int = 30000,
+    evidence_max_chars: int = 52000,
+) -> str:
     language = state.brief.language if state.brief else str(state.task.get("language", "en"))
+    state_section_chars = max(1000, int(state_max_chars) // 3)
+    prompt_packet = compact_evidence_packet_json(
+        evidence_packet,
+        max_chars=evidence_max_chars,
+    )
     return f"""
 <protocol>WRITER_V1</protocol>
 
@@ -281,16 +292,16 @@ Requirements:
 - Do not mention internal agent names, state objects, prompts, or workflow mechanics.
 
 <original_task>
-{compact_json(state.task, 12000)}
+{compact_json(state.task, state_section_chars)}
 </original_task>
 <research_brief>
-{compact_json(state.brief.to_dict() if state.brief else {}, 12000)}
+{compact_json(state.brief.to_dict() if state.brief else {}, state_section_chars)}
 </research_brief>
 <coverage_and_gaps>
-{compact_json({"coverage": state.coverage, "gaps": state.gaps, "conflicts": state.conflicts}, 12000)}
+{compact_json({"coverage": state.coverage, "gaps": state.gaps, "conflicts": state.conflicts}, state_section_chars)}
 </coverage_and_gaps>
 <evidence_packet>
-{compact_json(evidence_packet, 52000)}
+{prompt_packet}
 </evidence_packet>
 
 Return only the report, not JSON.
@@ -302,7 +313,16 @@ def build_audit_prompt(
     evidence_packet: list[dict[str, Any]],
     *,
     max_repair_tasks: int,
+    state_max_chars: int = 30000,
+    evidence_max_chars: int = 42000,
 ) -> str:
+    task_chars = max(1000, int(state_max_chars) // 3)
+    draft_chars = max(2000, int(state_max_chars))
+    prompt_packet = compact_evidence_packet_json(
+        evidence_packet,
+        max_chars=evidence_max_chars,
+        preferred_text=state.article,
+    )
     return f"""
 <protocol>AUDITOR_V1</protocol>
 
@@ -318,9 +338,9 @@ Check:
 Create at most {max_repair_tasks} targeted repair tasks. A repair task must say exactly what evidence is missing;
 it must not ask for generic improvement or rewriting.
 
-<original_task>{compact_json(state.task, 10000)}</original_task>
-<draft_report>{state.article[:50000]}</draft_report>
-<evidence_packet>{compact_json(evidence_packet, 42000)}</evidence_packet>
+<original_task>{compact_json(state.task, task_chars)}</original_task>
+<draft_report>{state.article[:draft_chars]}</draft_report>
+<evidence_packet>{prompt_packet}</evidence_packet>
 
 Return JSON only:
 {{
@@ -334,3 +354,191 @@ Return JSON only:
   ]
 }}
 """.strip()
+
+
+def compact_evidence_packet_json(
+    evidence_packet: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    preferred_text: str = "",
+) -> str:
+    """Serialize a bounded, non-duplicated evidence view for model prompts.
+
+    Persisted evidence remains complete. The prompt view removes the duplicated
+    supports/refutes/qualifies arrays (relation already exists on each evidence
+    item), keeps relation diversity, and samples whole claims instead of cutting
+    JSON in the middle. For audits, claims using URLs cited by the draft are
+    prioritized.
+    """
+
+    budget = max(1000, int(max_chars))
+    entries = [_compact_claim_for_prompt(item) for item in evidence_packet if isinstance(item, dict)]
+    entries = [item for item in entries if item.get("evidence")]
+    if not entries:
+        return "[]"
+
+    preferred: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    preferred_haystack = str(preferred_text or "")
+    for item in entries:
+        urls = [str(ev.get("source_url", "")) for ev in item.get("evidence", [])]
+        if preferred_haystack and any(url and url in preferred_haystack for url in urls):
+            preferred.append(item)
+        else:
+            remaining.append(item)
+    ordered = preferred + remaining
+
+    full = _render_prompt_packet(ordered, total_claims=len(entries))
+    if len(full) <= budget:
+        return full
+
+    low = 1
+    high = len(ordered)
+    best = _select_prompt_claims(preferred, remaining, 1)
+    best_text = _render_prompt_packet(best, total_claims=len(entries))
+    while low <= high:
+        count = (low + high) // 2
+        selected = _select_prompt_claims(preferred, remaining, count)
+        rendered = _render_prompt_packet(selected, total_claims=len(entries))
+        if len(rendered) <= budget:
+            best = selected
+            best_text = rendered
+            low = count + 1
+        else:
+            high = count - 1
+
+    if len(best_text) <= budget:
+        return best_text
+
+    # This is only reachable with unusually long URLs or identifiers. Keep a
+    # syntactically valid minimal packet; the inference gateway remains the
+    # final token-level safety boundary.
+    first = ordered[0]
+    minimal_evidence = []
+    if first.get("evidence"):
+        evidence = first["evidence"][0]
+        minimal_evidence.append(
+            {
+                "evidence_id": evidence.get("evidence_id", ""),
+                "relation": evidence.get("relation", "supports"),
+                "source_url": evidence.get("source_url", ""),
+            }
+        )
+    minimal = [
+        {
+            "claim_id": first.get("claim_id", ""),
+            "claim": _bounded_text(first.get("claim", ""), 500),
+            "evidence": minimal_evidence,
+            "packet_note": f"{max(0, len(entries) - 1)} additional claims omitted by prompt budget",
+        }
+    ]
+    return json.dumps(minimal, ensure_ascii=False, indent=2)
+
+
+def _compact_claim_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+    raw_evidence = item.get("evidence", [])
+    if not isinstance(raw_evidence, list):
+        raw_evidence = []
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for evidence in raw_evidence:
+        if not isinstance(evidence, dict):
+            continue
+        identity = str(evidence.get("evidence_id") or evidence.get("source_url") or id(evidence))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(evidence)
+
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[str] = set()
+    for relation in ("supports", "refutes", "qualifies"):
+        for evidence in unique:
+            if str(evidence.get("relation", "supports")) != relation:
+                continue
+            identity = str(evidence.get("evidence_id") or evidence.get("source_url") or id(evidence))
+            if identity not in selected_ids:
+                selected.append(evidence)
+                selected_ids.add(identity)
+            break
+    for evidence in unique:
+        if len(selected) >= 3:
+            break
+        identity = str(evidence.get("evidence_id") or evidence.get("source_url") or id(evidence))
+        if identity not in selected_ids:
+            selected.append(evidence)
+            selected_ids.add(identity)
+
+    prompt_evidence = []
+    for evidence in selected:
+        prompt_evidence.append(
+            {
+                "evidence_id": evidence.get("evidence_id", ""),
+                "relation": evidence.get("relation", "supports"),
+                "excerpt": _bounded_text(evidence.get("excerpt", ""), 1200),
+                "locator": _bounded_text(evidence.get("locator", ""), 300),
+                "confidence": evidence.get("confidence", "medium"),
+                "source_title": _bounded_text(evidence.get("source_title", ""), 300),
+                "source_url": evidence.get("source_url", ""),
+                "publish_date": evidence.get("publish_date", ""),
+                "source_quality": evidence.get("source_quality", ""),
+                "independence_group": evidence.get("independence_group", ""),
+            }
+        )
+
+    qualifiers = item.get("qualifiers", [])
+    if not isinstance(qualifiers, list):
+        qualifiers = []
+    return {
+        "claim_id": item.get("claim_id", ""),
+        "claim": _bounded_text(item.get("claim", ""), 2000),
+        "confidence": item.get("confidence", "medium"),
+        "status": item.get("status", "supported"),
+        "qualifiers": [_bounded_text(value, 500) for value in qualifiers[:8]],
+        "evidence": prompt_evidence,
+        "omitted_evidence": max(0, len(unique) - len(prompt_evidence)),
+    }
+
+
+def _select_prompt_claims(
+    preferred: list[dict[str, Any]],
+    remaining: list[dict[str, Any]],
+    count: int,
+) -> list[dict[str, Any]]:
+    target = max(1, int(count))
+    selected = preferred[:target]
+    slots = target - len(selected)
+    if slots > 0:
+        selected.extend(_even_sample(remaining, slots))
+    return selected
+
+
+def _even_sample(values: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    if count <= 0 or not values:
+        return []
+    if count >= len(values):
+        return list(values)
+    if count == 1:
+        return [values[0]]
+    indices = [round(index * (len(values) - 1) / (count - 1)) for index in range(count)]
+    return [values[index] for index in indices]
+
+
+def _render_prompt_packet(values: list[dict[str, Any]], *, total_claims: int) -> str:
+    payload = list(values)
+    omitted = max(0, int(total_claims) - len(values))
+    if omitted:
+        payload.append(
+            {
+                "packet_note": "Some lower-priority claims were omitted to fit the prompt budget.",
+                "omitted_claims": omitted,
+            }
+        )
+    return json.dumps(jsonable(payload), ensure_ascii=False, indent=2)
+
+
+def _bounded_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"

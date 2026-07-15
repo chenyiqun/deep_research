@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ..json_utils import extract_json
-from .context import ResearcherContextBuilder
+from .context import ContextWindowExceeded, ResearcherContextBuilder, TokenCounter
+from .inference import is_context_length_error
 from .llm import add_token_usage, call_chat
 from .prompts import (
     AUDITOR_SYSTEM_PROMPT,
@@ -446,31 +447,130 @@ class ResearcherAgent:
         return bundle
 
 
+def build_semantically_bounded_prompt(
+    *,
+    builder: Callable[[int, int], str],
+    token_counter: TokenCounter,
+    system_prompt: str,
+    max_model_len: int,
+    max_output_tokens: int,
+    context_safety_tokens: int,
+    state_max_chars: int,
+    evidence_max_chars: int,
+) -> tuple[str, int]:
+    """Shrink structured prompt sections before the gateway's final guard.
+
+    Each rebuild keeps complete evidence objects and valid enclosing prompt
+    sections. This avoids relying on a raw middle truncation for normal Writer
+    and Auditor overflows.
+    """
+
+    max_input_tokens = (
+        max(1, int(max_model_len))
+        - max(1, int(max_output_tokens))
+        - max(1, int(context_safety_tokens))
+    )
+    if max_input_tokens <= 0:
+        raise ContextWindowExceeded("Model window leaves no room for structured Agent input")
+
+    state_chars = max(1000, int(state_max_chars))
+    evidence_chars = max(1000, int(evidence_max_chars))
+    min_state_chars = min(state_chars, 4000)
+    min_evidence_chars = min(evidence_chars, 6000)
+    prompt = ""
+    estimated_tokens = 0
+    for _ in range(12):
+        prompt = builder(state_chars, evidence_chars)
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        estimated_tokens = token_counter.count_messages(messages)
+        if estimated_tokens <= max_input_tokens:
+            return prompt, estimated_tokens
+
+        ratio = min(0.85, max(0.2, (max_input_tokens / estimated_tokens) * 0.9))
+        next_state_chars = max(min_state_chars, int(state_chars * ratio))
+        next_evidence_chars = max(min_evidence_chars, int(evidence_chars * ratio))
+        if next_state_chars >= state_chars and state_chars > min_state_chars:
+            next_state_chars = max(min_state_chars, state_chars - 1000)
+        if next_evidence_chars >= evidence_chars and evidence_chars > min_evidence_chars:
+            next_evidence_chars = max(min_evidence_chars, evidence_chars - 1000)
+        if next_state_chars == state_chars and next_evidence_chars == evidence_chars:
+            break
+        state_chars = next_state_chars
+        evidence_chars = next_evidence_chars
+
+    # The generic gateway will preserve the protocol prefix/suffix if even the
+    # minimum semantic view does not fit (for example, an exceptionally long
+    # original user task). Return the measured size so it can make that choice.
+    return prompt, estimated_tokens
+
+
 class ReportWriter:
-    def __init__(self, *, llm: Any, max_tokens: int, temperature: float) -> None:
+    def __init__(
+        self,
+        *,
+        llm: Any,
+        max_tokens: int,
+        temperature: float,
+        state_prompt_max_chars: int = 30000,
+        evidence_prompt_max_chars: int = 52000,
+        token_counter: TokenCounter | None = None,
+        max_model_len: int = 32768,
+        context_safety_tokens: int = 512,
+    ) -> None:
         self.llm = llm
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.state_prompt_max_chars = max(1000, int(state_prompt_max_chars))
+        self.evidence_prompt_max_chars = max(1000, int(evidence_prompt_max_chars))
+        self.token_counter = token_counter or TokenCounter()
+        self.max_model_len = max(1, int(max_model_len))
+        self.context_safety_tokens = max(1, int(context_safety_tokens))
 
     async def write(
         self,
         state: GlobalResearchState,
-    ) -> tuple[str, list[dict[str, Any]], dict[str, int]]:
+    ) -> tuple[str, list[dict[str, Any]], dict[str, int], bool]:
         packet = build_evidence_packet(state)
-        response, usage = await call_chat(
-            self.llm,
-            user_prompt=build_writer_prompt(state, packet),
+        prompt, estimated_input_tokens = build_semantically_bounded_prompt(
+            builder=lambda state_chars, evidence_chars: build_writer_prompt(
+                state,
+                packet,
+                state_max_chars=state_chars,
+                evidence_max_chars=evidence_chars,
+            ),
+            token_counter=self.token_counter,
             system_prompt=WRITER_SYSTEM_PROMPT,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            role="writer",
-            run_id=state.run_id,
-            request_id=f"{state.run_id}:writer:{state.state_version}",
+            max_model_len=self.max_model_len,
+            max_output_tokens=self.max_tokens,
+            context_safety_tokens=self.context_safety_tokens,
+            state_max_chars=self.state_prompt_max_chars,
+            evidence_max_chars=self.evidence_prompt_max_chars,
         )
+        try:
+            response, usage = await call_chat(
+                self.llm,
+                user_prompt=prompt,
+                system_prompt=WRITER_SYSTEM_PROMPT,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                role="writer",
+                run_id=state.run_id,
+                request_id=f"{state.run_id}:writer:{state.state_version}",
+                estimated_input_tokens=estimated_input_tokens,
+            )
+        except Exception as exc:
+            if not isinstance(exc, ContextWindowExceeded) and not is_context_length_error(exc):
+                raise
+            response = ""
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         article = str(response or "").strip()
+        used_fallback = not bool(article)
         if not article:
             article = fallback_report(state, packet)
-        return article, packet, usage
+        return article, packet, usage, used_fallback
 
 
 class CitationAuditor:
@@ -481,29 +581,62 @@ class CitationAuditor:
         max_tokens: int,
         max_repair_tasks: int,
         temperature: float = 0.0,
+        state_prompt_max_chars: int = 30000,
+        evidence_prompt_max_chars: int = 42000,
+        token_counter: TokenCounter | None = None,
+        max_model_len: int = 32768,
+        context_safety_tokens: int = 512,
     ) -> None:
         self.llm = llm
         self.max_tokens = max_tokens
         self.max_repair_tasks = max_repair_tasks
         self.temperature = temperature
+        self.state_prompt_max_chars = max(1000, int(state_prompt_max_chars))
+        self.evidence_prompt_max_chars = max(1000, int(evidence_prompt_max_chars))
+        self.token_counter = token_counter or TokenCounter()
+        self.max_model_len = max(1, int(max_model_len))
+        self.context_safety_tokens = max(1, int(context_safety_tokens))
 
     async def audit(
         self,
         state: GlobalResearchState,
         evidence_packet: list[dict[str, Any]],
     ) -> tuple[AuditResult, str, dict[str, int]]:
-        response, usage = await call_chat(
-            self.llm,
-            user_prompt=build_audit_prompt(state, evidence_packet, max_repair_tasks=self.max_repair_tasks),
+        prompt, estimated_input_tokens = build_semantically_bounded_prompt(
+            builder=lambda state_chars, evidence_chars: build_audit_prompt(
+                state,
+                evidence_packet,
+                max_repair_tasks=self.max_repair_tasks,
+                state_max_chars=state_chars,
+                evidence_max_chars=evidence_chars,
+            ),
+            token_counter=self.token_counter,
             system_prompt=AUDITOR_SYSTEM_PROMPT,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            role="auditor",
-            run_id=state.run_id,
-            request_id=f"{state.run_id}:auditor:{state.audit_round}:{state.state_version}",
-            response_schema=AUDIT_SCHEMA,
-            schema_name="citation_audit",
+            max_model_len=self.max_model_len,
+            max_output_tokens=self.max_tokens,
+            context_safety_tokens=self.context_safety_tokens,
+            state_max_chars=self.state_prompt_max_chars,
+            evidence_max_chars=self.evidence_prompt_max_chars,
         )
+        try:
+            response, usage = await call_chat(
+                self.llm,
+                user_prompt=prompt,
+                system_prompt=AUDITOR_SYSTEM_PROMPT,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                role="auditor",
+                run_id=state.run_id,
+                request_id=f"{state.run_id}:auditor:{state.audit_round}:{state.state_version}",
+                response_schema=AUDIT_SCHEMA,
+                schema_name="citation_audit",
+                estimated_input_tokens=estimated_input_tokens,
+            )
+        except Exception as exc:
+            if not isinstance(exc, ContextWindowExceeded) and not is_context_length_error(exc):
+                raise
+            response = ""
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         parsed = parse_object(response)
         if parsed is None:
             audit = fallback_audit(state)

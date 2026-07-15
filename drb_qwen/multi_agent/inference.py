@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from ..async_llm_client import AsyncChatResponse, LLMHTTPError
-from .context import TokenCounter
+from .context import ContextWindowExceeded, TokenCounter, fit_user_prompt_to_budget
 from .protocols import json_response_format
 
 
@@ -32,6 +32,10 @@ class AgentInferenceConfig:
     forward_priority: bool = False
     disable_thinking_for_json: bool = True
     advanced_option_fallback: bool = True
+    max_model_len: int = 32768
+    context_safety_tokens: int = 512
+    context_retry_shrink_tokens: int = 1024
+    context_retry_attempts: int = 1
 
     def __post_init__(self) -> None:
         self.max_concurrent_requests = max(1, int(self.max_concurrent_requests))
@@ -44,6 +48,12 @@ class AgentInferenceConfig:
             1, min(int(self.max_concurrent_per_run), self.max_concurrent_requests)
         )
         self.max_inflight_tokens = max(1, int(self.max_inflight_tokens))
+        self.max_model_len = max(1, int(self.max_model_len))
+        self.context_safety_tokens = max(1, int(self.context_safety_tokens))
+        self.context_retry_shrink_tokens = max(1, int(self.context_retry_shrink_tokens))
+        self.context_retry_attempts = max(0, int(self.context_retry_attempts))
+        if self.context_safety_tokens >= self.max_model_len:
+            raise ValueError("context_safety_tokens must be smaller than max_model_len")
 
 
 @dataclass
@@ -127,6 +137,9 @@ class _AdmissionController:
 class GatewayMetrics:
     requests: int = 0
     advanced_fallbacks: int = 0
+    context_truncations: int = 0
+    context_retries: int = 0
+    context_retry_failures: int = 0
     queue_wait_ms: float = 0.0
     requests_by_role: dict[str, int] = field(default_factory=dict)
 
@@ -134,6 +147,9 @@ class GatewayMetrics:
         return {
             "requests": self.requests,
             "advanced_fallbacks": self.advanced_fallbacks,
+            "context_truncations": self.context_truncations,
+            "context_retries": self.context_retries,
+            "context_retry_failures": self.context_retry_failures,
             "queue_wait_ms": round(self.queue_wait_ms, 3),
             "requests_by_role": dict(self.requests_by_role),
         }
@@ -176,27 +192,78 @@ class AgentInferenceGateway:
         schema_name: str = "agent_response",
         estimated_input_tokens: int = 0,
     ) -> AsyncChatResponse:
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
-        input_tokens = estimated_input_tokens or self.token_counter.count_messages(messages)
+        output_tokens = max(1, int(max_tokens))
+        max_input_tokens = (
+            self.config.max_model_len
+            - output_tokens
+            - self.config.context_safety_tokens
+        )
+        if max_input_tokens <= 0:
+            raise ContextWindowExceeded(
+                f"Requested {output_tokens} output tokens plus "
+                f"{self.config.context_safety_tokens} safety tokens for a "
+                f"{self.config.max_model_len}-token model window"
+            )
+
+        fitted = fit_user_prompt_to_budget(
+            token_counter=self.token_counter,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_input_tokens=max_input_tokens,
+            original_tokens=estimated_input_tokens,
+        )
+        current_prompt = fitted.prompt
+        input_tokens = fitted.estimated_tokens
+        if fitted.truncated:
+            self.metrics.context_truncations += 1
         reservation = input_tokens + max(1, int(max_tokens))
         queued_at = time.monotonic()
         permit = await self.admission.acquire(role, run_id, reservation)
         queue_wait_ms = (time.monotonic() - queued_at) * 1000.0
         try:
-            response = await self._call_base(
-                user_prompt=user_prompt,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                role=role,
-                request_id=request_id,
-                response_schema=response_schema,
-                schema_name=schema_name,
-            )
+            response = None
+            retry_budget = max_input_tokens
+            for context_attempt in range(self.config.context_retry_attempts + 1):
+                try:
+                    response = await self._call_base(
+                        user_prompt=current_prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        top_p=top_p,
+                        max_tokens=max_tokens,
+                        role=role,
+                        request_id=request_id,
+                        response_schema=response_schema,
+                        schema_name=schema_name,
+                    )
+                    break
+                except Exception as exc:
+                    if (
+                        context_attempt >= self.config.context_retry_attempts
+                        or not is_context_length_error(exc)
+                    ):
+                        if is_context_length_error(exc) and context_attempt > 0:
+                            self.metrics.context_retry_failures += 1
+                        raise
+                    retry_budget = max(
+                        1,
+                        retry_budget - self.config.context_retry_shrink_tokens,
+                    )
+                    refitted = fit_user_prompt_to_budget(
+                        token_counter=self.token_counter,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        max_input_tokens=retry_budget,
+                    )
+                    if refitted.prompt == current_prompt:
+                        self.metrics.context_retry_failures += 1
+                        raise
+                    current_prompt = refitted.prompt
+                    input_tokens = refitted.estimated_tokens
+                    self.metrics.context_truncations += 1
+                    self.metrics.context_retries += 1
+            if response is None:
+                raise RuntimeError("Agent inference ended without a response")
         finally:
             await self.admission.release(permit)
 
@@ -211,6 +278,10 @@ class AgentInferenceGateway:
                 "subtask_id": subtask_id,
                 "queue_wait_ms": round(queue_wait_ms, 3),
                 "estimated_input_tokens": input_tokens,
+                "original_estimated_input_tokens": fitted.original_tokens,
+                "max_input_tokens": max_input_tokens,
+                "input_truncated": current_prompt != user_prompt,
+                "dropped_input_chars": max(0, len(user_prompt) - len(current_prompt)),
                 "token_reservation": reservation,
             }
         )
@@ -269,9 +340,55 @@ class AgentInferenceGateway:
         if not self.config.advanced_option_fallback:
             return False
         if isinstance(exc, LLMHTTPError):
-            return exc.status in {400, 404, 405, 422}
+            if exc.status in {404, 405}:
+                return True
+            if exc.status not in {400, 422} or is_context_length_error(exc):
+                return False
+            return has_advanced_option_error(exc.body)
         text = str(exc).lower()
-        return any(f"http {status}" in text for status in (400, 404, 405, 422)) or "unexpected keyword" in text
+        if is_context_length_error(exc):
+            return False
+        if any(f"http {status}" in text for status in (404, 405)):
+            return True
+        return (
+            any(f"http {status}" in text for status in (400, 422))
+            and has_advanced_option_error(text)
+        ) or "unexpected keyword" in text
+
+
+def is_context_length_error(exc: BaseException | str) -> bool:
+    if isinstance(exc, LLMHTTPError):
+        text = exc.body.lower()
+    else:
+        text = str(exc).lower()
+    markers = (
+        "maximum context length",
+        "context length",
+        "input_tokens",
+        "prompt is too long",
+        "too many tokens",
+        "max_model_len",
+    )
+    return any(marker in text for marker in markers)
+
+
+def has_advanced_option_error(value: str) -> bool:
+    text = str(value).lower()
+    option_markers = (
+        "response_format",
+        "json_schema",
+        "structured output",
+        "structured_outputs",
+        "priority",
+        "request_id",
+        "chat_template_kwargs",
+        "unknown field",
+        "unknown parameter",
+        "unsupported parameter",
+        "unexpected keyword",
+        "extra_forbidden",
+    )
+    return any(marker in text for marker in option_markers)
 
 
 def role_group(role: str) -> str:

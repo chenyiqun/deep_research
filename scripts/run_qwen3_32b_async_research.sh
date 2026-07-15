@@ -58,6 +58,8 @@ SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
 SEARCH_COUNT="${SEARCH_COUNT:-10}"
 REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}"
 SOURCE_CONTENT_MAX_CHARS="${SOURCE_CONTENT_MAX_CHARS:-12000}"
+STATE_PROMPT_MAX_CHARS="${STATE_PROMPT_MAX_CHARS:-24000}"
+EVIDENCE_PROMPT_MAX_CHARS="${EVIDENCE_PROMPT_MAX_CHARS:-36000}"
 JUDGE_MAX_TOKENS="${JUDGE_MAX_TOKENS:-4096}"
 JUDGE_CONTEXT_RETRY_ATTEMPTS="${JUDGE_CONTEXT_RETRY_ATTEMPTS:-2}"
 JUDGE_CONTEXT_SAFETY_TOKENS="${JUDGE_CONTEXT_SAFETY_TOKENS:-256}"
@@ -142,6 +144,8 @@ echo "Search top-k: ${SEARCH_TOP_K}"
 echo "Search count: ${SEARCH_COUNT}"
 echo "Judge max tokens: ${JUDGE_MAX_TOKENS}"
 echo "Source content max chars: ${SOURCE_CONTENT_MAX_CHARS}"
+echo "State prompt max chars: ${STATE_PROMPT_MAX_CHARS}"
+echo "Evidence prompt max chars: ${EVIDENCE_PROMPT_MAX_CHARS}"
 
 echo "Waiting for vLLM server: ${VLLM_BASE_URL}/models"
 VLLM_READY=0
@@ -240,6 +244,8 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --max-repair-tasks "${MAX_REPAIR_TASKS}" \
   --auditor-max-tokens "${AUDITOR_MAX_TOKENS}" \
   --source-content-max-chars "${SOURCE_CONTENT_MAX_CHARS}" \
+  --state-prompt-max-chars "${STATE_PROMPT_MAX_CHARS}" \
+  --evidence-prompt-max-chars "${EVIDENCE_PROMPT_MAX_CHARS}" \
   --report-max-tokens "${REPORT_MAX_TOKENS}" \
   "${INFERENCE_ARGS[@]}" \
   "${URL_FETCH_ARGS[@]}"

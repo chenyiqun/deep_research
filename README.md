@@ -186,6 +186,7 @@ MAX_CONCURRENT_LLM_CALLS=16 \
 SEARCH_ENGINE=search_plus \
 URL_FETCH_MODE=auto \
 URL_VISIT_ENDPOINT= \
+TOKENIZER_PATH=/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-32B \
 MAX_CONCURRENT_URL_FETCHES=16 \
 URL_FETCH_TIMEOUT_S=30 \
 MAX_ROUNDS=3 \
@@ -238,6 +239,7 @@ Important runtime controls include:
 - `--max-audit-rounds`: Citation Audit and targeted repair limit.
 - `--run-state-dir` / `--resume-runs`: checkpoint and recovery behavior.
 - `--max-model-len`, `--context-safety-tokens`, and `--tokenizer-path`: token-aware input budgeting.
+- `--state-prompt-max-chars` and `--evidence-prompt-max-chars`: first-stage structured Writer/Auditor compaction limits. The runtime then measures the rendered chat template, samples complete evidence objects until it fits, and retains a final gateway-level truncation/retry guard for tokenizer mismatches.
 - `--max-concurrent-control-calls`, `--max-concurrent-long-calls`, and `--max-inflight-llm-tokens`: role-aware admission control.
 - `--forward-vllm-priority`: forward Main/Researcher/Reader/Writer priority to a vLLM server started with priority scheduling.
 - `--disable-structured-outputs`: compatibility escape hatch for older vLLM; the normal path uses JSON Schema.
