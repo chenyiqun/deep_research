@@ -52,6 +52,7 @@ async def search_one_engine(
             "query": args.query,
             "search_engine": profile.key,
             "provider": profile.provider,
+            "api_engine_candidates": list(profile.api_engines),
             "native_content": profile.native_content,
             "fetch_pages_by_default": profile.fetch_pages_by_default,
             "num_results": len(results),
@@ -64,6 +65,7 @@ async def search_one_engine(
             "query": args.query,
             "search_engine": profile.key,
             "provider": profile.provider,
+            "api_engine_candidates": list(profile.api_engines),
             "native_content": profile.native_content,
             "fetch_pages_by_default": profile.fetch_pages_by_default,
             "num_results": 0,
@@ -115,6 +117,7 @@ def print_human_readable(output: dict[str, Any], max_content_chars: int) -> None
             f"native_content={payload['native_content']} | "
             f"default_page_fetch={payload['fetch_pages_by_default']}"
         )
+        print(f"API engine candidates: {', '.join(payload['api_engine_candidates'])}")
         print(f"Status: {'OK' if payload['ok'] else 'FAILED'} | results={payload['num_results']}")
         if payload["error"]:
             print(f"Error: {payload['error']}")
@@ -129,7 +132,8 @@ def print_human_readable(output: dict[str, Any], max_content_chars: int) -> None
             print(
                 f"Content: chars={len(content)} kind={result.get('content_kind') or '-'} "
                 f"quality={result.get('source_quality') or '-'} "
-                f"method={result.get('extraction_method') or '-'}"
+                f"method={result.get('extraction_method') or '-'} "
+                f"api_engine={result.get('api_search_engine') or '-'}"
             )
             print(preview or "<empty content>")
 

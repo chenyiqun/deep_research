@@ -15,6 +15,7 @@ class SearchEngineProfile:
     provider: str
     native_content: bool
     fetch_pages_by_default: bool
+    api_engines: tuple[str, ...]
 
     @property
     def result_source_quality(self) -> str:
@@ -29,12 +30,24 @@ class SearchEngineProfile:
 # are treated as discovery/snippet providers in auto mode and therefore use
 # the URL fetcher. Callers can override this with --url-fetch-mode.
 SEARCH_ENGINE_PROFILES: dict[str, SearchEngineProfile] = {
-    "search_pro_jina": SearchEngineProfile("search_pro_jina", "jina", False, True),
-    "search_prime": SearchEngineProfile("search_prime", "google", False, True),
-    "search_pro_ms": SearchEngineProfile("search_pro_ms", "bing", False, True),
-    "search_live": SearchEngineProfile("search_live", "sogou", True, False),
-    "search_lite": SearchEngineProfile("search_lite", "quark", False, True),
-    "search_plus": SearchEngineProfile("search_plus", "baidu", False, True),
+    "search_pro_jina": SearchEngineProfile("search_pro_jina", "jina", False, True, ("search_pro_jina",)),
+    "search_prime": SearchEngineProfile("search_prime", "google", False, True, ("search_prime",)),
+    "search_pro_ms": SearchEngineProfile("search_pro_ms", "bing", False, True, ("search_pro_ms",)),
+    "search_live": SearchEngineProfile(
+        "search_live",
+        "sogou",
+        True,
+        False,
+        ("search_pro_sogou", "search_live"),
+    ),
+    "search_lite": SearchEngineProfile(
+        "search_lite",
+        "quark",
+        False,
+        True,
+        ("search_pro_quark", "search_lite"),
+    ),
+    "search_plus": SearchEngineProfile("search_plus", "baidu", False, True, ("search_plus",)),
 }
 SUPPORTED_SEARCH_ENGINES = tuple(SEARCH_ENGINE_PROFILES)
 URL_FETCH_MODES = ("auto", "always", "never")
@@ -66,7 +79,7 @@ class WebSearchConfig:
     endpoint: str = PROD_WEB_SEARCH_ENDPOINT
     access_key: str = ""
     search_engine: str = DEFAULT_SEARCH_ENGINE
-    count: int = 15
+    count: int = 10
     search_domain_filter: str = ""
     search_recency_filter: str = "noLimit"
     content_size: str = "high"
@@ -86,6 +99,8 @@ class WebSearchConfig:
         invalid = [name for name, value in positive.items() if value <= 0]
         if invalid:
             raise ValueError(f"WebSearchConfig fields must be positive: {', '.join(invalid)}")
+        if self.search_engine == "search_live" and self.count not in {10, 20, 30, 40, 50}:
+            raise ValueError("search_live count must be one of: 10, 20, 30, 40, 50")
         if self.retry_sleep_s < 0:
             raise ValueError("WebSearchConfig.retry_sleep_s cannot be negative")
 
@@ -101,6 +116,7 @@ class SearchResult:
     publish_date: str = ""
     search_query: str = ""
     search_engine: str = ""
+    api_search_engine: str = ""
     content_kind: str = ""
     source_quality: str = ""
     extraction_method: str = ""
@@ -139,7 +155,6 @@ class WebSearchClient:
             raise RuntimeError("WebSearchClient must be used as an async context manager.")
 
         payload: dict[str, Any] = {
-            "search_engine": self.config.search_engine,
             "search_query": query,
             "count": self.config.count,
             "search_recency_filter": self.config.search_recency_filter,
@@ -153,38 +168,90 @@ class WebSearchClient:
             "Content-Type": "application/json",
         }
 
+        profile = get_search_engine_profile(self.config.search_engine)
+        engine_errors: list[str] = []
         async with self._semaphore:
-            last_error: Exception | None = None
-            for attempt in range(1, self.config.max_retries + 1):
+            for api_engine in profile.api_engines:
                 try:
-                    async with self._session.post(
-                        self.config.endpoint,
-                        json=payload,
+                    return await self._search_with_api_engine(
+                        payload=payload,
                         headers=headers,
-                    ) as response:
-                        text = await response.text()
-                        if response.status >= 400:
-                            raise RuntimeError(
-                                f"web search failed with HTTP {response.status}: {text[:1000]}"
-                            )
-                        data = await response.json()
-                        return parse_search_results(
-                            data,
-                            query,
-                            search_engine=self.config.search_engine,
-                        )[:top_k]
-                except Exception as exc:
-                    last_error = exc
-                    if attempt >= self.config.max_retries:
-                        break
-                    await asyncio.sleep(self.config.retry_sleep_s * attempt)
-            raise RuntimeError(f"web search failed after retries: {last_error}") from last_error
+                        query=query,
+                        top_k=top_k,
+                        api_engine=api_engine,
+                    )
+                except SearchEngineUnavailableError as exc:
+                    engine_errors.append(str(exc))
+                    continue
+        details = "; ".join(engine_errors) or "no compatible API engine was attempted"
+        raise RuntimeError(
+            f"web search engine {self.config.search_engine} is unavailable; tried "
+            f"{', '.join(profile.api_engines)}: {details}"
+        )
+
+    async def _search_with_api_engine(
+        self,
+        *,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        query: str,
+        top_k: int,
+        api_engine: str,
+    ) -> list[SearchResult]:
+        if self._session is None:
+            raise RuntimeError("WebSearchClient must be used as an async context manager.")
+        request_payload = {**payload, "search_engine": api_engine}
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.max_retries + 1):
+            try:
+                async with self._session.post(
+                    self.config.endpoint,
+                    json=request_payload,
+                    headers=headers,
+                ) as response:
+                    text = await response.text()
+                    if response.status >= 400:
+                        message = f"api_engine={api_engine} HTTP {response.status}: {text[:1000]}"
+                        if is_unknown_search_engine_error(response.status, text):
+                            raise SearchEngineUnavailableError(message)
+                        raise RuntimeError(f"web search failed with {message}")
+                    data = await response.json()
+                    return parse_search_results(
+                        data,
+                        query,
+                        search_engine=self.config.search_engine,
+                        api_search_engine=api_engine,
+                    )[:top_k]
+            except SearchEngineUnavailableError:
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.config.max_retries:
+                    break
+                await asyncio.sleep(self.config.retry_sleep_s * attempt)
+        raise RuntimeError(f"web search failed after retries with api_engine={api_engine}: {last_error}") from last_error
+
+
+class SearchEngineUnavailableError(RuntimeError):
+    pass
+
+
+def is_unknown_search_engine_error(status: int, response_text: str) -> bool:
+    lowered = str(response_text or "").lower()
+    return status in {400, 404} and (
+        '"code":"1211"' in lowered
+        or '"code": "1211"' in lowered
+        or "模型不存在" in response_text
+        or "model not found" in lowered
+        or "model does not exist" in lowered
+    )
 
 
 def parse_search_results(
     data: Any,
     query: str,
     search_engine: str = DEFAULT_SEARCH_ENGINE,
+    api_search_engine: str = "",
 ) -> list[SearchResult]:
     results: list[SearchResult] = []
     profile = get_search_engine_profile(search_engine)
@@ -214,6 +281,7 @@ def parse_search_results(
                 publish_date=first_text(item, "publish_date", "published_at", "date", "time"),
                 search_query=query,
                 search_engine=profile.key,
+                api_search_engine=api_search_engine or profile.api_engines[0],
                 content_kind="native_content" if profile.native_content else "snippet",
                 source_quality=profile.result_source_quality,
                 extraction_method=profile.result_extraction_method,

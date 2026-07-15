@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SEARCH_ENGINE,
         choices=SUPPORTED_SEARCH_ENGINES,
     )
-    parser.add_argument("--search-count", type=int, default=15)
+    parser.add_argument("--search-count", type=int, default=10)
     parser.add_argument("--search-top-k", type=int, default=5)
     parser.add_argument("--search-recency-filter", default="noLimit")
     parser.add_argument("--search-content-size", default="high")

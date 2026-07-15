@@ -255,6 +255,10 @@ The search endpoint supports six engines:
 
 `search_live` is the default. Its returned content is sent directly to the Reader and recorded as
 `search_native_content`; the workflow does not create a URL fetcher or charge fetch-tool budget in auto mode.
+The public logical names remain stable across backend versions: `search_live` first calls the current
+`search_pro_sogou` API model and falls back to the legacy `search_live` alias on error 1211;
+`search_lite` similarly maps to `search_pro_quark` with a legacy fallback. Sogou search count defaults to 10
+and must be one of 10, 20, 30, 40, or 50.
 For the other engines, auto mode fetches each top-k URL and falls back to the search snippet if extraction
 fails. Use `--url-fetch-mode always` to force page fetching or `--url-fetch-mode never` to disable it.
 The legacy `--disable-url-fetch` and `URL_FETCH_ENABLED` controls remain compatible.
@@ -301,7 +305,7 @@ PYTHONPATH="$PWD" python scripts/test_search_url_fetch.py \
   --query-file /mnt/tidal-alsh01/usr/chenyiqun/datasets/DeepResearch/deep_research_bench_data/query.jsonl \
   --query-limit 5 \
   --only-lang zh \
-  --search-count 15 \
+  --search-count 10 \
   --search-top-k 8 \
   --url-visit-endpoint http://127.0.0.1:8765/visit \
   --disable-url-visit-fallback \

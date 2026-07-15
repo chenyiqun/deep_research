@@ -1358,6 +1358,9 @@ Bing=`search_pro_ms`、Sogou=`search_live`、Quark=`search_lite`、Baidu=`search
 - `never`：无论引擎都只使用搜索接口返回内容。
 
 Sogou 原生结果标记为 `search_native_content`，普通搜索摘要标记为 `search_snippet`。
+对外逻辑名和后端模型代码分离：`search_live` 的候选后端为
+`search_pro_sogou -> search_live`，`search_lite` 的候选后端为
+`search_pro_quark -> search_lite`；只有 1211 模型不存在错误会触发别名回退。
 前者不是“网页已抓取”的同义词，但可以作为 Reader 的直接输入；后者的高置信度会被规则降级。
 所有模式仍要求合法的外部来源 URL，保证 Writer 可以给出可审计引用。
 

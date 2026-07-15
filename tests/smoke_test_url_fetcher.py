@@ -13,7 +13,10 @@ from drb_qwen.visit_server import VisitService, is_probably_pdf
 from drb_qwen.web_search import (
     DEFAULT_SEARCH_ENGINE,
     SUPPORTED_SEARCH_ENGINES,
+    WebSearchClient,
     WebSearchConfig,
+    get_search_engine_profile,
+    is_unknown_search_engine_error,
     parse_search_results,
     should_fetch_result_pages,
 )
@@ -28,6 +31,65 @@ async def assert_visit_service_rejects_unsafe_urls() -> None:
         assert "unsafe URL" in str(exc)
     else:
         raise AssertionError("visit service must validate URLs before selecting a fetch backend")
+
+
+class FakeSearchResponse:
+    def __init__(self, status: int, body: str, data: dict | None = None) -> None:
+        self.status = status
+        self.body = body
+        self.data = data or {}
+
+    async def __aenter__(self) -> "FakeSearchResponse":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def text(self) -> str:
+        return self.body
+
+    async def json(self) -> dict:
+        return self.data
+
+
+class FakeSearchSession:
+    def __init__(self) -> None:
+        self.api_engines: list[str] = []
+
+    def post(self, endpoint: str, json: dict, headers: dict) -> FakeSearchResponse:
+        api_engine = str(json["search_engine"])
+        self.api_engines.append(api_engine)
+        if api_engine == "search_pro_sogou":
+            return FakeSearchResponse(
+                400,
+                '{"error":{"code":"1211","message":"模型不存在，请检查模型代码。"}}',
+            )
+        return FakeSearchResponse(
+            200,
+            "{}",
+            {
+                "search_result": [
+                    {
+                        "title": "legacy alias result",
+                        "content": "direct search content",
+                        "link": "https://example.com/result",
+                    }
+                ]
+            },
+        )
+
+
+async def assert_search_engine_alias_fallback() -> None:
+    client = WebSearchClient(
+        WebSearchConfig(access_key="test", search_engine="search_live", count=10, max_retries=1)
+    )
+    session = FakeSearchSession()
+    client._session = session
+    results = await client.search("test", top_k=1)
+    assert session.api_engines == ["search_pro_sogou", "search_live"]
+    assert len(results) == 1
+    assert results[0].search_engine == "search_live"
+    assert results[0].api_search_engine == "search_live"
 
 
 def main() -> None:
@@ -90,6 +152,18 @@ def main() -> None:
     assert should_fetch_result_pages("search_prime", "auto") is True
     assert should_fetch_result_pages("search_live", "always") is True
     assert should_fetch_result_pages("search_prime", "never") is False
+    assert get_search_engine_profile("search_live").api_engines == (
+        "search_pro_sogou",
+        "search_live",
+    )
+    assert get_search_engine_profile("search_lite").api_engines == (
+        "search_pro_quark",
+        "search_lite",
+    )
+    assert is_unknown_search_engine_error(
+        400,
+        '{"error":{"code":"1211","message":"模型不存在，请检查模型代码。"}}',
+    )
     parsed = parse_search_results(
         {
             "data": {
@@ -108,6 +182,7 @@ def main() -> None:
     )
     assert len(parsed) == 1
     assert parsed[0].search_engine == "search_live"
+    assert parsed[0].api_search_engine == "search_pro_sogou"
     assert parsed[0].content_kind == "native_content"
     assert parsed[0].source_quality == "search_native_content"
     assert parsed[0].extraction_method == "search_live_content"
@@ -118,7 +193,14 @@ def main() -> None:
         pass
     else:
         raise AssertionError("unknown search engines must fail before an API request")
+    try:
+        WebSearchConfig(search_engine="search_live", count=15)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Sogou count must use the API-supported 10-result increments")
     asyncio.run(assert_visit_service_rejects_unsafe_urls())
+    asyncio.run(assert_search_engine_alias_fallback())
     print("smoke_test_url_fetcher passed")
 
 

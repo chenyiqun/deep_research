@@ -47,7 +47,7 @@ class DeepResearchConfig:
     min_rounds: int = 1
     max_search_queries_per_round: int = 2
     search_top_k: int = 5
-    search_count: int = 15
+    search_count: int = 10
     fetch_full_content: bool = True
     min_fetched_content_chars: int = 500
     max_concurrent_readers: int = 12
