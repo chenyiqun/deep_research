@@ -8,6 +8,9 @@ GPU_DEVICES="${GPU_DEVICES:-0,1,2,3,4,5,6,7}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-8}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-1}"
+ENABLE_CHUNKED_PREFILL="${ENABLE_CHUNKED_PREFILL:-1}"
+SCHEDULING_POLICY="${SCHEDULING_POLICY:-priority}"
 VLLM_HOST="${VLLM_HOST:-0.0.0.0}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 OUT_DIR="${OUT_DIR:-${REPO_DIR}/outputs/vllm_qwen3_32b_server}"
@@ -31,7 +34,22 @@ echo "Served model name: ${SERVED_MODEL_NAME}"
 echo "GPU devices: ${GPU_DEVICES}"
 echo "Tensor parallel size: ${TENSOR_PARALLEL_SIZE}"
 echo "Base URL: http://${VLLM_HOST}:${VLLM_PORT}/v1"
+echo "Prefix caching: ${ENABLE_PREFIX_CACHING}"
+echo "Chunked prefill: ${ENABLE_CHUNKED_PREFILL}"
+echo "Scheduling policy: ${SCHEDULING_POLICY}"
 echo "Log file: ${LOG_FILE}"
+
+VLLM_AGENT_ARGS=(--scheduling-policy "${SCHEDULING_POLICY}")
+case "${ENABLE_PREFIX_CACHING}" in
+  1|true|True|TRUE|yes|Yes|YES)
+    VLLM_AGENT_ARGS+=(--enable-prefix-caching)
+    ;;
+esac
+case "${ENABLE_CHUNKED_PREFILL}" in
+  1|true|True|TRUE|yes|Yes|YES)
+    VLLM_AGENT_ARGS+=(--enable-chunked-prefill)
+    ;;
+esac
 
 nohup env CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
   vllm serve "${MODEL_PATH}" \
@@ -42,6 +60,7 @@ nohup env CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
     --trust-remote-code \
+    "${VLLM_AGENT_ARGS[@]}" \
   >"${LOG_FILE}" 2>&1 &
 
 PID="$!"

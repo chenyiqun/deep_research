@@ -17,6 +17,7 @@ from .url_fetcher import (
     URLFetchResult,
     clean_text,
     select_relevant_excerpt,
+    should_try_fetch_url,
 )
 
 
@@ -136,6 +137,9 @@ class VisitService:
     async def visit(self, url: str, goal: str) -> dict[str, Any]:
         if self.fetcher is None:
             raise RuntimeError("VisitService has not started.")
+        url = str(url).strip()
+        if not should_try_fetch_url(url):
+            raise ValueError("unsupported or unsafe URL")
 
         best, browser_error = await self._fetch_best_content(url)
 
@@ -795,6 +799,8 @@ if app is not None:
     async def visit(request: VisitRequest) -> dict[str, Any]:
         try:
             return await app.state.service.visit(request.url, request.goal)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

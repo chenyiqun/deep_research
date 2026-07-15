@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+
 from drb_qwen.url_fetcher import (
+    URLFetchConfig,
     extract_text_from_html,
     normalize_visit_endpoint,
     select_relevant_excerpt,
     should_try_fetch_url,
 )
-from drb_qwen.visit_server import is_probably_pdf
+from drb_qwen.visit_server import VisitService, is_probably_pdf
+
+
+async def assert_visit_service_rejects_unsafe_urls() -> None:
+    service = VisitService(URLFetchConfig())
+    service.fetcher = object()  # type: ignore[assignment]
+    try:
+        await service.visit("http://127.0.0.1/private", "test")
+    except ValueError as exc:
+        assert "unsafe URL" in str(exc)
+    else:
+        raise AssertionError("visit service must validate URLs before selecting a fetch backend")
 
 
 def main() -> None:
@@ -40,11 +54,21 @@ def main() -> None:
     assert "信用评级" in excerpt
     assert should_try_fetch_url("https://example.com/a")
     assert not should_try_fetch_url("ftp://example.com/a")
+    assert not should_try_fetch_url("http://127.0.0.1/private")
+    assert not should_try_fetch_url("http://169.254.169.254/latest/meta-data")
+    assert not should_try_fetch_url("https://user:password@example.com/private")
+    try:
+        URLFetchConfig(max_concurrent_requests=0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid fetch concurrency must fail before creating a deadlocked semaphore")
     assert is_probably_pdf("https://example.com/report.pdf")
     assert is_probably_pdf("https://example.com/download?id=1", "application/pdf")
     assert not is_probably_pdf("https://example.com/article.html", "text/html")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"
     assert normalize_visit_endpoint("http://localhost:8765/visit") == "http://localhost:8765/visit"
+    asyncio.run(assert_visit_service_rejects_unsafe_urls())
     print("smoke_test_url_fetcher passed")
 
 

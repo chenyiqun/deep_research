@@ -22,6 +22,19 @@ class WebSearchConfig:
     max_retries: int = 3
     retry_sleep_s: float = 1.5
 
+    def __post_init__(self) -> None:
+        positive = {
+            "count": self.count,
+            "timeout_s": self.timeout_s,
+            "max_concurrent_requests": self.max_concurrent_requests,
+            "max_retries": self.max_retries,
+        }
+        invalid = [name for name, value in positive.items() if value <= 0]
+        if invalid:
+            raise ValueError(f"WebSearchConfig fields must be positive: {', '.join(invalid)}")
+        if self.retry_sleep_s < 0:
+            raise ValueError("WebSearchConfig.retry_sleep_s cannot be negative")
+
 
 @dataclass
 class SearchResult:

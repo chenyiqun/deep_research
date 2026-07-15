@@ -41,8 +41,10 @@ async def run_task(
                     {
                         "id": task_id,
                         "prompt": task["prompt"],
+                        "run_id": result.get("run_id"),
                         "state": result["state"],
                         "trace": result["trace"],
+                        "audit": result.get("audit"),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -56,6 +58,8 @@ async def run_task(
             "prompt": task["prompt"],
             "article": result["article"],
             "model": model_name,
+            "run_id": result.get("run_id"),
+            "research_phase": result.get("state", {}).get("phase"),
         }
         if trace_path is not None:
             row["research_trace_file"] = str(trace_path)
@@ -84,27 +88,51 @@ def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(trace, list):
         trace = []
 
+    state = result.get("state", {})
+    if not isinstance(state, dict):
+        state = {}
     fetches: list[dict[str, Any]] = []
     search_queries = 0
     search_results = 0
     reader_notes = 0
-    for round_item in trace:
-        if not isinstance(round_item, dict):
+    wave_count = 0
+    for event in trace:
+        if not isinstance(event, dict):
             continue
-        plan = round_item.get("plan", {})
-        if isinstance(plan, dict):
-            queries = plan.get("search_queries", [])
+        event_type = str(event.get("type", ""))
+        payload = event.get("payload", event)
+        if not isinstance(payload, dict):
+            payload = {}
+        if event_type == "scheduler_wave_completed":
+            wave_count += 1
+        if event_type == "researcher_step":
+            queries = payload.get("queries", [])
             if isinstance(queries, list):
                 search_queries += len(queries)
-        results_by_query = round_item.get("search_results", {})
+            observations = payload.get("observations", [])
+            if isinstance(observations, list):
+                search_results += len(observations)
+                reader_notes += len(observations)
+                for observation in observations:
+                    if not isinstance(observation, dict):
+                        continue
+                    fetch = observation.get("fetch")
+                    if isinstance(fetch, dict):
+                        fetches.append(fetch)
+
+        # Backward compatibility for traces created by the previous fixed-round workflow.
+        plan = event.get("plan", {})
+        if isinstance(plan, dict) and isinstance(plan.get("search_queries"), list):
+            search_queries += len(plan["search_queries"])
+        results_by_query = event.get("search_results", {})
         if isinstance(results_by_query, dict):
             search_results += sum(len(v) for v in results_by_query.values() if isinstance(v, list))
-        round_fetches = round_item.get("source_fetches", [])
-        if isinstance(round_fetches, list):
-            fetches.extend(item for item in round_fetches if isinstance(item, dict))
-        notes = round_item.get("reader_notes", [])
-        if isinstance(notes, list):
-            reader_notes += len(notes)
+        old_fetches = event.get("source_fetches", [])
+        if isinstance(old_fetches, list):
+            fetches.extend(item for item in old_fetches if isinstance(item, dict))
+        old_notes = event.get("reader_notes", [])
+        if isinstance(old_notes, list):
+            reader_notes += len(old_notes)
 
     reader_chars = [safe_int(item.get("reader_content_chars")) for item in fetches]
     reader_chars = [value for value in reader_chars if value >= 0]
@@ -126,11 +154,13 @@ def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
         for item in fetches
         if normalize_log_value(item.get("extraction_method"))
     )
-    state = result.get("state", {})
-    if not isinstance(state, dict):
-        state = {}
+    claims = state.get("claims", {})
+    evidence = state.get("evidence", {})
+    tasks = state.get("tasks", {})
+    budget = state.get("budget", {}) if isinstance(state.get("budget"), dict) else {}
     return {
-        "rounds": len(trace),
+        "rounds": int(state.get("main_round", wave_count)),
+        "scheduler_waves": wave_count,
         "search_queries": search_queries,
         "search_results": search_results,
         "url_fetches": len(fetches),
@@ -153,8 +183,16 @@ def summarize_research_result(result: dict[str, Any]) -> dict[str, Any]:
             f"{name}:{count}" for name, count in method_counts.most_common(4)
         ),
         "article_chars": len(str(result.get("article", ""))),
-        "state_findings": len(state.get("findings", [])) if isinstance(state.get("findings"), list) else 0,
-        "state_evidence": len(state.get("evidence", [])) if isinstance(state.get("evidence"), list) else 0,
+        "state_findings": len(claims) if isinstance(claims, (dict, list)) else 0,
+        "state_evidence": len(evidence) if isinstance(evidence, (dict, list)) else 0,
+        "subtasks": len(tasks) if isinstance(tasks, dict) else 0,
+        "phase": str(state.get("phase", "")),
+        "audit_passed": bool((result.get("audit") or {}).get("passed", False)),
+        "total_tokens": safe_int(budget.get("total_tokens")),
+        "llm_calls": sum(
+            max(0, safe_int(budget.get(key)))
+            for key in ("main_calls", "researcher_calls", "reader_calls", "writer_calls", "auditor_calls")
+        ),
     }
 
 
@@ -172,6 +210,9 @@ def format_research_task_log(
         f"[report task={task_id}] ok "
         f"article_chars={summary['article_chars']} "
         f"rounds={summary['rounds']} "
+        f"waves={summary['scheduler_waves']} "
+        f"subtasks={summary['subtasks']} "
+        f"phase={summary['phase']} "
         f"search_queries={summary['search_queries']} "
         f"search_results={summary['search_results']} "
         f"url_fetches={summary['url_fetches']} "
@@ -189,6 +230,9 @@ def format_research_task_log(
         f"methods={method_text} "
         f"state_findings={summary['state_findings']} "
         f"state_evidence={summary['state_evidence']} "
+        f"audit_passed={summary['audit_passed']} "
+        f"llm_calls={summary['llm_calls']} "
+        f"tokens={summary['total_tokens']} "
         f"trace={trace_text}"
     )
 
@@ -219,6 +263,9 @@ async def run_async(args: argparse.Namespace) -> None:
     trace_dir = Path(args.trace_dir) if args.trace_dir else None
     if trace_dir is not None:
         trace_dir.mkdir(parents=True, exist_ok=True)
+    run_state_dir = args.run_state_dir
+    if not run_state_dir and trace_dir is not None:
+        run_state_dir = str(trace_dir.parent / "run_state")
 
     web_search_api_key = args.web_search_api_key or os.environ.get(args.web_search_api_key_env, "")
     if not web_search_api_key:
@@ -262,6 +309,35 @@ async def run_async(args: argparse.Namespace) -> None:
         source_content_max_chars=args.source_content_max_chars,
         state_prompt_max_chars=args.state_prompt_max_chars,
         evidence_prompt_max_chars=args.evidence_prompt_max_chars,
+        max_initial_tasks=args.max_initial_tasks,
+        max_researchers=args.max_researchers,
+        max_subtasks=args.max_subtasks,
+        max_new_tasks_per_round=args.max_new_tasks_per_round,
+        max_react_steps=args.max_react_steps,
+        max_tool_calls_per_subtask=args.max_tool_calls_per_subtask,
+        max_total_tool_calls=args.max_total_tool_calls,
+        max_total_searches=args.max_total_searches,
+        max_total_tokens=args.max_total_tokens,
+        max_run_seconds=args.max_run_seconds,
+        min_total_claims=args.min_total_claims,
+        min_coverage_ratio=args.min_coverage_ratio,
+        citation_audit_enabled=not args.disable_citation_audit,
+        auditor_max_tokens=args.auditor_max_tokens,
+        max_audit_rounds=args.max_audit_rounds,
+        max_repair_tasks=args.max_repair_tasks,
+        run_state_dir=run_state_dir,
+        resume_runs=args.resume_runs or args.resume,
+        max_model_len=args.max_model_len,
+        context_safety_tokens=args.context_safety_tokens,
+        tokenizer_path=args.tokenizer_path,
+        inference_max_concurrent_requests=args.max_concurrent_llm_calls,
+        inference_control_concurrency=args.max_concurrent_control_calls,
+        inference_long_output_concurrency=args.max_concurrent_long_calls,
+        inference_max_concurrent_per_run=args.max_concurrent_llm_calls_per_run,
+        inference_max_inflight_tokens=args.max_inflight_llm_tokens,
+        inference_structured_outputs=not args.disable_structured_outputs,
+        inference_forward_priority=args.forward_vllm_priority,
+        inference_disable_thinking_for_json=not args.enable_agent_thinking,
     )
     url_fetch_config = URLFetchConfig(
         timeout_s=args.url_fetch_timeout_s,
@@ -283,6 +359,11 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Max concurrent tasks: {args.max_concurrent_tasks}")
     print(f"Max concurrent LLM calls: {args.max_concurrent_llm_calls}")
     print(f"Max rounds: {args.max_rounds}")
+    print(f"Max researchers per run: {args.max_researchers}")
+    print(f"Max subtasks per run: {args.max_subtasks}")
+    print(f"Max ReAct steps per subtask: {args.max_react_steps}")
+    print(f"Max total tool calls per run: {args.max_total_tool_calls}")
+    print(f"Max total tokens per run: {args.max_total_tokens}")
     print(f"Search count: {args.search_count}")
     print(f"Search top-k: {args.search_top_k}")
     print(f"Search queries per round: {args.max_search_queries_per_round}")
@@ -301,6 +382,9 @@ async def run_async(args: argparse.Namespace) -> None:
         print(f"Source content max chars for reader: {args.source_content_max_chars}")
     print(f"Max concurrent readers: {args.max_concurrent_readers}")
     print(f"Trace dir: {trace_dir if trace_dir is not None else '<none>'}")
+    print(f"Run state dir: {run_state_dir or '<memory-only>'}")
+    print(f"Resume run checkpoints: {args.resume_runs or args.resume}")
+    print(f"Citation audit enabled: {not args.disable_citation_audit}")
 
     task_semaphore = asyncio.Semaphore(args.max_concurrent_tasks)
     output_lock = asyncio.Lock()
@@ -347,6 +431,12 @@ def main() -> None:
     parser.add_argument("--only-lang", choices=["zh", "en"], default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--run-state-dir",
+        default="",
+        help="Durable per-run snapshots, local states, events, bundles, and artifacts. Defaults next to trace-dir.",
+    )
+    parser.add_argument("--resume-runs", action="store_true", help="Resume incomplete per-run checkpoints.")
 
     parser.add_argument("--llm-base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--llm-model", default="qwen3-32b")
@@ -379,19 +469,45 @@ def main() -> None:
     parser.add_argument("--url-fetch-cache-errors", action="store_true")
     parser.add_argument("--min-fetched-content-chars", type=int, default=500)
 
-    parser.add_argument("--max-rounds", type=int, default=3)
+    parser.add_argument("--max-rounds", type=int, default=4, help="Maximum Main planning calls including the initial plan.")
     parser.add_argument("--min-rounds", type=int, default=1)
-    parser.add_argument("--max-search-queries-per-round", type=int, default=3)
+    parser.add_argument("--max-search-queries-per-round", type=int, default=2, help="Maximum queries per Researcher ReAct step.")
     parser.add_argument("--max-concurrent-tasks", type=int, default=4)
     parser.add_argument("--max-concurrent-readers", type=int, default=12)
-    parser.add_argument("--planner-max-tokens", type=int, default=2048)
-    parser.add_argument("--reader-max-tokens", type=int, default=2048)
-    parser.add_argument("--summarizer-max-tokens", type=int, default=3072)
-    parser.add_argument("--state-updater-max-tokens", type=int, default=4096)
+    parser.add_argument("--planner-max-tokens", type=int, default=3072)
+    parser.add_argument("--reader-max-tokens", type=int, default=1536)
+    parser.add_argument("--summarizer-max-tokens", type=int, default=1200)
+    parser.add_argument("--state-updater-max-tokens", type=int, default=3072)
     parser.add_argument("--report-max-tokens", type=int, default=8192)
     parser.add_argument("--source-content-max-chars", type=int, default=12000)
     parser.add_argument("--state-prompt-max-chars", type=int, default=24000)
     parser.add_argument("--evidence-prompt-max-chars", type=int, default=36000)
+    parser.add_argument("--max-initial-tasks", type=int, default=4)
+    parser.add_argument("--max-researchers", type=int, default=4)
+    parser.add_argument("--max-subtasks", type=int, default=16)
+    parser.add_argument("--max-new-tasks-per-round", type=int, default=3)
+    parser.add_argument("--max-react-steps", type=int, default=3)
+    parser.add_argument("--max-tool-calls-per-subtask", type=int, default=18)
+    parser.add_argument("--max-total-tool-calls", type=int, default=160)
+    parser.add_argument("--max-total-searches", type=int, default=30)
+    parser.add_argument("--max-total-tokens", type=int, default=1_000_000)
+    parser.add_argument("--max-run-seconds", type=int, default=3600)
+    parser.add_argument("--min-total-claims", type=int, default=3)
+    parser.add_argument("--min-coverage-ratio", type=float, default=0.6)
+    parser.add_argument("--disable-citation-audit", action="store_true")
+    parser.add_argument("--auditor-max-tokens", type=int, default=3072)
+    parser.add_argument("--max-audit-rounds", type=int, default=2)
+    parser.add_argument("--max-repair-tasks", type=int, default=3)
+    parser.add_argument("--max-model-len", type=int, default=32768)
+    parser.add_argument("--context-safety-tokens", type=int, default=512)
+    parser.add_argument("--tokenizer-path", default="")
+    parser.add_argument("--max-concurrent-control-calls", type=int, default=8)
+    parser.add_argument("--max-concurrent-long-calls", type=int, default=2)
+    parser.add_argument("--max-concurrent-llm-calls-per-run", type=int, default=12)
+    parser.add_argument("--max-inflight-llm-tokens", type=int, default=262_144)
+    parser.add_argument("--disable-structured-outputs", action="store_true")
+    parser.add_argument("--forward-vllm-priority", action="store_true")
+    parser.add_argument("--enable-agent-thinking", action="store_true")
     args = parser.parse_args()
     asyncio.run(run_async(args))
 

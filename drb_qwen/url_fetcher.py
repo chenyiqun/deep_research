@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import ipaddress
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -10,7 +11,7 @@ from html.parser import HTMLParser
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 
 DEFAULT_USER_AGENT = (
@@ -27,12 +28,30 @@ class URLFetchConfig:
     visit_fallback_to_direct_fetch: bool = True
     max_concurrent_requests: int = 16
     max_retries: int = 2
+    max_redirects: int = 5
     retry_sleep_s: float = 1.0
     max_bytes: int = 2_000_000
     max_extracted_chars: int = 50_000
     user_agent: str = DEFAULT_USER_AGENT
     cache_dir: str = ""
     cache_errors: bool = False
+
+    def __post_init__(self) -> None:
+        positive = {
+            "timeout_s": self.timeout_s,
+            "visit_timeout_s": self.visit_timeout_s,
+            "max_concurrent_requests": self.max_concurrent_requests,
+            "max_retries": self.max_retries,
+            "max_bytes": self.max_bytes,
+            "max_extracted_chars": self.max_extracted_chars,
+        }
+        invalid = [name for name, value in positive.items() if value <= 0]
+        if invalid:
+            raise ValueError(f"URLFetchConfig fields must be positive: {', '.join(invalid)}")
+        if self.max_redirects < 0:
+            raise ValueError("URLFetchConfig.max_redirects cannot be negative")
+        if self.retry_sleep_s < 0:
+            raise ValueError("URLFetchConfig.retry_sleep_s cannot be negative")
 
 
 @dataclass
@@ -109,7 +128,7 @@ class URLContentFetcher:
         async with self._semaphore:
             cache_key = self._cache_key(url, goal)
             cached = self._read_cache(cache_key)
-            if cached is not None:
+            if cached is not None and should_try_fetch_url(cached.final_url or cached.url):
                 return cached
 
             visit_error = ""
@@ -262,41 +281,74 @@ class URLContentFetcher:
 
     async def _fetch_once(self, url: str) -> URLFetchResult:
         assert self._session is not None
-        async with self._session.get(url, allow_redirects=True) as response:
-            body, truncated = await read_limited(response, self.config.max_bytes)
-            content_type = response.headers.get("content-type", "")
-            final_url = str(response.url)
-            if response.status >= 400:
+        current_url = url
+        for redirect_count in range(max(0, self.config.max_redirects) + 1):
+            async with self._session.get(current_url, allow_redirects=False) as response:
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = str(response.headers.get("location", "")).strip()
+                    if not location:
+                        return URLFetchResult(
+                            url=url,
+                            ok=False,
+                            status=response.status,
+                            final_url=current_url,
+                            error="redirect response is missing Location",
+                        )
+                    if redirect_count >= self.config.max_redirects:
+                        return URLFetchResult(
+                            url=url,
+                            ok=False,
+                            status=response.status,
+                            final_url=current_url,
+                            error="too many redirects",
+                        )
+                    next_url = urljoin(current_url, location)
+                    if not should_try_fetch_url(next_url):
+                        return URLFetchResult(
+                            url=url,
+                            ok=False,
+                            status=response.status,
+                            final_url=current_url,
+                            error="redirect target is not an allowed public URL",
+                        )
+                    current_url = next_url
+                    continue
+
+                body, truncated = await read_limited(response, self.config.max_bytes)
+                content_type = response.headers.get("content-type", "")
+                final_url = str(response.url)
+                if response.status >= 400:
+                    return URLFetchResult(
+                        url=url,
+                        ok=False,
+                        status=response.status,
+                        content_type=content_type,
+                        final_url=final_url,
+                        error=f"HTTP {response.status}",
+                        truncated_bytes=truncated,
+                    )
+
+                text, extraction_method, raw_text_chars = extract_response_text(
+                    body=body,
+                    content_type=content_type,
+                    url=final_url,
+                    encoding=response.charset,
+                    max_chars=self.config.max_extracted_chars,
+                )
                 return URLFetchResult(
                     url=url,
-                    ok=False,
+                    ok=bool(text.strip()),
                     status=response.status,
                     content_type=content_type,
                     final_url=final_url,
-                    error=f"HTTP {response.status}",
+                    text=text,
+                    error="" if text.strip() else "no extractable text",
+                    source="direct",
                     truncated_bytes=truncated,
+                    extraction_method=extraction_method,
+                    raw_text_chars=raw_text_chars,
                 )
-
-            text, extraction_method, raw_text_chars = extract_response_text(
-                body=body,
-                content_type=content_type,
-                url=final_url,
-                encoding=response.charset,
-                max_chars=self.config.max_extracted_chars,
-            )
-            return URLFetchResult(
-                url=url,
-                ok=bool(text.strip()),
-                status=response.status,
-                content_type=content_type,
-                final_url=final_url,
-                text=text,
-                error="" if text.strip() else "no extractable text",
-                source="direct",
-                truncated_bytes=truncated,
-                extraction_method=extraction_method,
-                raw_text_chars=raw_text_chars,
-            )
+        return URLFetchResult(url=url, ok=False, final_url=current_url, error="too many redirects")
 
 
 async def read_limited(response: Any, max_bytes: int) -> tuple[bytes, bool]:
@@ -319,7 +371,25 @@ async def read_limited(response: Any, max_bytes: int) -> tuple[bytes, bool]:
 
 def should_try_fetch_url(url: str) -> bool:
     parsed = urlparse(str(url).strip())
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        return False
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host or host in {"localhost", "metadata.google.internal", "metadata.azure.internal"}:
+        return False
+    if host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
 
 
 def normalize_visit_endpoint(value: str) -> str:

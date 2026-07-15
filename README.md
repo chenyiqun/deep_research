@@ -1,18 +1,21 @@
 # Qwen + vLLM DeepResearch-Bench Pipeline
 
-This is a compact full-flow implementation for DeepResearch-Bench style experiments:
+This is a full-flow implementation for DeepResearch-Bench experiments and arbitrary multi-agent research tasks:
 
 1. Load DRB tasks and rubrics.
 2. Generate research reports with a Qwen model served through vLLM.
 3. Use a Qwen model as LLM-as-judge for RACE quality scoring.
 4. Optionally run a lightweight FACT citation evaluation.
 
-The implementation is intentionally small and readable, so you can swap prompts, models, or data formats quickly.
+The vLLM, web tooling, multi-agent control plane, state schemas, and evaluation layers are separated so they can be tested or replaced independently.
 
 ## Project Layout
 
 ```text
 drb_qwen/
+  multi_agent/          # dynamic DAG, state, agents, tools, audit, persistence
+  run_multi_agent_research.py # one arbitrary research task through vLLM serve
+  generate_reports_async_research.py # DRB batch multi-agent generation
   generate_reports.py   # task -> report inference pipeline
   evaluate_race.py      # report + reference + rubrics -> RACE score
   evaluate_fact.py      # optional citation extraction / validation
@@ -99,20 +102,50 @@ bash scripts/launch_qwen3_8b_smoke_bg.sh
 
 ## Async Multi-Agent Deep Research Workflow
 
-The async workflow is closer to a real deep-research system:
+The async path now uses the event-driven architecture described in
+[`docs/deep_research_end_to_end_flow.md`](docs/deep_research_end_to_end_flow.md):
 
 ```text
-global information state
--> main agent plans searchable queries
--> web search returns top-k results
--> per-URL reader agents extract core information in parallel
--> query summarizer synthesizes reader notes
--> state updater emits only new/corrected information
--> main agent writes final report from the global state
--> async RACE judge evaluates against DRB reference reports
+ResearchRun + GlobalResearchState
+-> Main creates an initial coarse task DAG
+-> Scheduler dispatches READY subtasks in parallel
+-> each Researcher runs a bounded local ReAct loop
+-> every ReAct step is a separate inference request; tools run after that request releases
+-> Search / Fetch / Reader produce Source, Evidence, and Claim records
+-> deterministic Reducers merge AgentResult objects
+-> Main incrementally patches the DAG at strategic boundaries
+-> Writer generates only from the evidence packet
+-> Citation Auditor passes or creates targeted repair tasks
+-> final report remains compatible with RACE and FACT evaluation
 ```
 
-This path uses an OpenAI-compatible vLLM server, so generation and judging can run many requests concurrently without repeatedly loading the model.
+All Main, Researcher, Reader, Writer, Auditor, and RACE judge inference uses an
+OpenAI-compatible vLLM server. Search and URL extraction remain external tools.
+The original `deep_research_workflow.py` module is retained as a compatibility import;
+the implementation is under `drb_qwen/multi_agent/`.
+
+The runtime persists, per run:
+
+```text
+run_state/<run_id>/global_state.json
+run_state/<run_id>/events.jsonl
+run_state/<run_id>/local/<subtask_id>.json
+run_state/<run_id>/checkpoints/<subtask_id>.json
+run_state/<run_id>/bundles/<subtask_id>.json
+run_state/<run_id>/artifacts/*
+```
+
+The checkpoint contains the last fully reduced Researcher step, including its
+Source/Evidence/Claim records and usage. A restarted process resumes from that
+semantic state; it never depends on chat history or a pinned GPU KV session. If
+a terminal Researcher bundle was saved just before a process failure, the
+workflow merges that bundle before applying new budget checks.
+
+Reader evidence excerpts must occur in the supplied source text after
+whitespace normalization. Invalid/private source URLs and orphaned
+Source/Evidence/Claim references are rejected before they enter global state.
+Per-wave search allocations enforce the global search-call ceiling even when
+multiple Researchers run concurrently.
 
 Start Qwen3-32B as a vLLM server:
 
@@ -126,6 +159,10 @@ TENSOR_PARALLEL_SIZE=8 \
 MAX_MODEL_LEN=32768 \
 bash scripts/start_qwen3_32b_vllm_server.sh
 ```
+
+The server launcher explicitly enables automatic prefix caching, chunked
+prefill, and priority scheduling. Prefix cache is an evictable optimization;
+`LocalResearchState` remains the source of truth.
 
 After the server finishes loading, check it:
 
@@ -169,7 +206,39 @@ qwen3_32b_async_research_reports.jsonl  # report outputs, compatible with evalua
 race_raw_results.jsonl                  # async LLM-as-judge raw results
 race_summary.json                       # aggregate RACE scores
 traces/<id>.json                        # per-task search/read/state trace
+run_state/<run_id>/                     # durable global/local state, events, bundles, artifacts
 ```
+
+### Run one arbitrary research question
+
+```bash
+export WEB_SEARCH_API_KEY=<your_prod_web_search_key>
+
+python -m drb_qwen.run_multi_agent_research \
+  --prompt "研究企业级 AI Agent 的主要技术路线、市场和风险" \
+  --language zh \
+  --output-dir outputs/single_research \
+  --llm-base-url http://127.0.0.1:8000/v1 \
+  --llm-model qwen3-32b \
+  --tokenizer-path /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-32B \
+  --url-visit-endpoint http://127.0.0.1:8765/visit
+```
+
+The command writes `report.md`, `result.json`, URL cache data, and durable run
+state. Add `--resume` to continue an interrupted run.
+
+Important runtime controls include:
+
+- `--max-researchers`: parallel Researcher subtasks inside one run.
+- `--max-react-steps`: maximum local ReAct decisions per subtask.
+- `--max-subtasks` and `--max-rounds`: dynamic DAG and Main planning limits.
+- `--max-total-tool-calls`, `--max-total-searches`, and `--max-total-tokens`: run budgets.
+- `--max-audit-rounds`: Citation Audit and targeted repair limit.
+- `--run-state-dir` / `--resume-runs`: checkpoint and recovery behavior.
+- `--max-model-len`, `--context-safety-tokens`, and `--tokenizer-path`: token-aware input budgeting.
+- `--max-concurrent-control-calls`, `--max-concurrent-long-calls`, and `--max-inflight-llm-tokens`: role-aware admission control.
+- `--forward-vllm-priority`: forward Main/Researcher/Reader/Writer priority to a vLLM server started with priority scheduling.
+- `--disable-structured-outputs`: compatibility escape hatch for older vLLM; the normal path uses JSON Schema.
 
 `URL_FETCH_ENABLED=1` makes the workflow fetch each top-k search result URL and feed the reader the extracted page text. If fetching fails or the extracted text is too short, the reader falls back to the web-search snippet and records the fetch status in `traces/<id>.json`.
 

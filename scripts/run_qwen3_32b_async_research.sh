@@ -11,6 +11,15 @@ VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
 WEB_SEARCH_ENDPOINT="${WEB_SEARCH_ENDPOINT:-http://edithai.devops.xiaohongshu.com/ext-tools/zhipu-web-search-vip}"
 MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-4}"
 MAX_CONCURRENT_LLM_CALLS="${MAX_CONCURRENT_LLM_CALLS:-16}"
+MAX_CONCURRENT_CONTROL_CALLS="${MAX_CONCURRENT_CONTROL_CALLS:-8}"
+MAX_CONCURRENT_LONG_CALLS="${MAX_CONCURRENT_LONG_CALLS:-2}"
+MAX_CONCURRENT_LLM_CALLS_PER_RUN="${MAX_CONCURRENT_LLM_CALLS_PER_RUN:-12}"
+MAX_INFLIGHT_LLM_TOKENS="${MAX_INFLIGHT_LLM_TOKENS:-262144}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+CONTEXT_SAFETY_TOKENS="${CONTEXT_SAFETY_TOKENS:-512}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-}"
+FORWARD_VLLM_PRIORITY="${FORWARD_VLLM_PRIORITY:-1}"
+STRUCTURED_OUTPUTS_ENABLED="${STRUCTURED_OUTPUTS_ENABLED:-1}"
 MAX_CONCURRENT_SEARCHES="${MAX_CONCURRENT_SEARCHES:-8}"
 MAX_CONCURRENT_READERS="${MAX_CONCURRENT_READERS:-12}"
 URL_FETCH_ENABLED="${URL_FETCH_ENABLED:-1}"
@@ -27,6 +36,22 @@ URL_FETCH_CACHE_ERRORS="${URL_FETCH_CACHE_ERRORS:-0}"
 MIN_FETCHED_CONTENT_CHARS="${MIN_FETCHED_CONTENT_CHARS:-500}"
 MAX_ROUNDS="${MAX_ROUNDS:-3}"
 MAX_SEARCH_QUERIES_PER_ROUND="${MAX_SEARCH_QUERIES_PER_ROUND:-3}"
+MAX_INITIAL_TASKS="${MAX_INITIAL_TASKS:-4}"
+MAX_RESEARCHERS="${MAX_RESEARCHERS:-4}"
+MAX_SUBTASKS="${MAX_SUBTASKS:-16}"
+MAX_NEW_TASKS_PER_ROUND="${MAX_NEW_TASKS_PER_ROUND:-3}"
+MAX_REACT_STEPS="${MAX_REACT_STEPS:-3}"
+MAX_TOOL_CALLS_PER_SUBTASK="${MAX_TOOL_CALLS_PER_SUBTASK:-18}"
+MAX_TOTAL_TOOL_CALLS="${MAX_TOTAL_TOOL_CALLS:-160}"
+MAX_TOTAL_SEARCHES="${MAX_TOTAL_SEARCHES:-30}"
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-1000000}"
+MAX_RUN_SECONDS="${MAX_RUN_SECONDS:-3600}"
+MIN_TOTAL_CLAIMS="${MIN_TOTAL_CLAIMS:-3}"
+MIN_COVERAGE_RATIO="${MIN_COVERAGE_RATIO:-0.6}"
+MAX_AUDIT_ROUNDS="${MAX_AUDIT_ROUNDS:-2}"
+MAX_REPAIR_TASKS="${MAX_REPAIR_TASKS:-3}"
+AUDITOR_MAX_TOKENS="${AUDITOR_MAX_TOKENS:-4096}"
+RUN_STATE_DIR="${RUN_STATE_DIR:-${OUT_DIR}/run_state}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
 SEARCH_COUNT="${SEARCH_COUNT:-15}"
 REPORT_MAX_TOKENS="${REPORT_MAX_TOKENS:-8192}"
@@ -63,6 +88,11 @@ echo "vLLM model: ${VLLM_MODEL}"
 echo "Web search endpoint: ${WEB_SEARCH_ENDPOINT}"
 echo "Max concurrent tasks: ${MAX_CONCURRENT_TASKS}"
 echo "Max concurrent LLM calls: ${MAX_CONCURRENT_LLM_CALLS}"
+echo "Max concurrent control calls: ${MAX_CONCURRENT_CONTROL_CALLS}"
+echo "Max concurrent long-output calls: ${MAX_CONCURRENT_LONG_CALLS}"
+echo "Max in-flight LLM tokens: ${MAX_INFLIGHT_LLM_TOKENS}"
+echo "Model context length: ${MAX_MODEL_LEN}"
+echo "Tokenizer path: ${TOKENIZER_PATH:-conservative estimator}"
 echo "URL fetch enabled: ${URL_FETCH_ENABLED}"
 echo "URL visit endpoint: ${URL_VISIT_ENDPOINT}"
 echo "Max concurrent URL fetches: ${MAX_CONCURRENT_URL_FETCHES}"
@@ -75,6 +105,12 @@ echo "Min fetched content chars: ${MIN_FETCHED_CONTENT_CHARS}"
 echo "Max concurrent readers: ${MAX_CONCURRENT_READERS}"
 echo "Max concurrent searches: ${MAX_CONCURRENT_SEARCHES}"
 echo "Max rounds: ${MAX_ROUNDS}"
+echo "Max researchers per run: ${MAX_RESEARCHERS}"
+echo "Max subtasks per run: ${MAX_SUBTASKS}"
+echo "Max ReAct steps per subtask: ${MAX_REACT_STEPS}"
+echo "Max total tool calls per run: ${MAX_TOTAL_TOOL_CALLS}"
+echo "Max total tokens per run: ${MAX_TOTAL_TOKENS}"
+echo "Run state dir: ${RUN_STATE_DIR}"
 echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
 echo "Search top-k: ${SEARCH_TOP_K}"
 echo "Search count: ${SEARCH_COUNT}"
@@ -100,6 +136,7 @@ echo "vLLM server is ready."
 REPORT_FILE="${OUT_DIR}/qwen3_32b_async_research_reports.jsonl"
 
 URL_FETCH_ARGS=()
+INFERENCE_ARGS=()
 case "${URL_FETCH_ENABLED}" in
   0|false|False|FALSE|no|No|NO)
     URL_FETCH_ARGS+=(--disable-url-fetch)
@@ -119,11 +156,23 @@ case "${URL_FETCH_CACHE_ERRORS}" in
     URL_FETCH_ARGS+=(--url-fetch-cache-errors)
     ;;
 esac
+case "${FORWARD_VLLM_PRIORITY}" in
+  1|true|True|TRUE|yes|Yes|YES)
+    INFERENCE_ARGS+=(--forward-vllm-priority)
+    ;;
+esac
+case "${STRUCTURED_OUTPUTS_ENABLED}" in
+  0|false|False|FALSE|no|No|NO)
+    INFERENCE_ARGS+=(--disable-structured-outputs)
+    ;;
+esac
 
 PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --query-file "${DATA_DIR}/query.jsonl" \
   --output-file "${REPORT_FILE}" \
   --trace-dir "${OUT_DIR}/traces" \
+  --run-state-dir "${RUN_STATE_DIR}" \
+  --resume-runs \
   --limit "${LIMIT}" \
   --resume \
   --llm-base-url "${VLLM_BASE_URL}" \
@@ -131,6 +180,13 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --llm-api-key "${VLLM_API_KEY}" \
   --max-concurrent-tasks "${MAX_CONCURRENT_TASKS}" \
   --max-concurrent-llm-calls "${MAX_CONCURRENT_LLM_CALLS}" \
+  --max-concurrent-control-calls "${MAX_CONCURRENT_CONTROL_CALLS}" \
+  --max-concurrent-long-calls "${MAX_CONCURRENT_LONG_CALLS}" \
+  --max-concurrent-llm-calls-per-run "${MAX_CONCURRENT_LLM_CALLS_PER_RUN}" \
+  --max-inflight-llm-tokens "${MAX_INFLIGHT_LLM_TOKENS}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
+  --context-safety-tokens "${CONTEXT_SAFETY_TOKENS}" \
+  --tokenizer-path "${TOKENIZER_PATH}" \
   --web-search-endpoint "${WEB_SEARCH_ENDPOINT}" \
   --search-count "${SEARCH_COUNT}" \
   --search-top-k "${SEARCH_TOP_K}" \
@@ -145,8 +201,24 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --max-concurrent-readers "${MAX_CONCURRENT_READERS}" \
   --max-rounds "${MAX_ROUNDS}" \
   --max-search-queries-per-round "${MAX_SEARCH_QUERIES_PER_ROUND}" \
+  --max-initial-tasks "${MAX_INITIAL_TASKS}" \
+  --max-researchers "${MAX_RESEARCHERS}" \
+  --max-subtasks "${MAX_SUBTASKS}" \
+  --max-new-tasks-per-round "${MAX_NEW_TASKS_PER_ROUND}" \
+  --max-react-steps "${MAX_REACT_STEPS}" \
+  --max-tool-calls-per-subtask "${MAX_TOOL_CALLS_PER_SUBTASK}" \
+  --max-total-tool-calls "${MAX_TOTAL_TOOL_CALLS}" \
+  --max-total-searches "${MAX_TOTAL_SEARCHES}" \
+  --max-total-tokens "${MAX_TOTAL_TOKENS}" \
+  --max-run-seconds "${MAX_RUN_SECONDS}" \
+  --min-total-claims "${MIN_TOTAL_CLAIMS}" \
+  --min-coverage-ratio "${MIN_COVERAGE_RATIO}" \
+  --max-audit-rounds "${MAX_AUDIT_ROUNDS}" \
+  --max-repair-tasks "${MAX_REPAIR_TASKS}" \
+  --auditor-max-tokens "${AUDITOR_MAX_TOKENS}" \
   --source-content-max-chars "${SOURCE_CONTENT_MAX_CHARS}" \
   --report-max-tokens "${REPORT_MAX_TOKENS}" \
+  "${INFERENCE_ARGS[@]}" \
   "${URL_FETCH_ARGS[@]}"
 
 PYTHONPATH="${REPO_DIR}" python -m drb_qwen.evaluate_race_async \
