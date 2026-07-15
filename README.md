@@ -183,7 +183,7 @@ VLLM_BASE_URL=http://127.0.0.1:8000/v1 \
 VLLM_MODEL=qwen3-32b \
 MAX_CONCURRENT_TASKS=4 \
 MAX_CONCURRENT_LLM_CALLS=16 \
-SEARCH_ENGINE=search_prime \
+SEARCH_ENGINE=search_plus \
 URL_FETCH_MODE=auto \
 URL_VISIT_ENDPOINT= \
 MAX_CONCURRENT_URL_FETCHES=16 \
@@ -222,7 +222,7 @@ python -m drb_qwen.run_multi_agent_research \
   --llm-base-url http://127.0.0.1:8000/v1 \
   --llm-model qwen3-32b \
   --tokenizer-path /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-32B \
-  --search-engine search_prime \
+  --search-engine search_plus \
   --url-fetch-mode auto
 ```
 
@@ -251,11 +251,12 @@ The search endpoint supports six engines:
 | `search_pro_ms` | Bing | fetch result pages |
 | `search_live` | Sogou | use returned search content directly |
 | `search_lite` | Quark | fetch result pages |
-| `search_plus` | Baidu | fetch result pages |
+| `search_plus` | Baidu | use returned search content directly |
 
-`search_prime` is the current default because it is available on the deployed endpoint. In auto mode its
-result URLs go through the safe page-fetch/Reader path. `search_live`, when an endpoint supports it, sends
-returned content directly to the Reader as `search_native_content` without charging page-fetch tool budget.
+`search_plus` is the current default because the deployed endpoint returns complete reader-ready Baidu
+content. In auto mode it goes directly to the Reader as `search_native_content`; no URL fetcher is created
+and no page-fetch tool budget is charged. Google remains available through `search_prime + auto`, which
+routes result URLs through the safe page-fetch/Reader path. `search_live` behaves like Baidu when an endpoint supports it.
 The public logical names remain stable across backend versions: `search_live` first calls the current
 `search_pro_sogou` API model and falls back to the legacy `search_live` alias on error 1211;
 `search_lite` similarly maps to `search_pro_quark` with a legacy fallback. Sogou search count defaults to 10
@@ -271,9 +272,9 @@ export WEB_SEARCH_API_KEY=<your_prod_web_search_key>
 
 python scripts/test_web_search.py \
   --query "多智能体 deep research 最新进展" \
-  --search-engine search_prime \
+  --search-engine search_plus \
   --search-top-k 5 \
-  --output-file outputs/search_prime_test.json
+  --output-file outputs/search_plus_test.json
 ```
 
 Pass `--all-engines` to test all six search tools in one run.
@@ -290,7 +291,7 @@ python scripts/test_all_search_engines.py \
 
 Inspect `summary.json`, `attempts.jsonl`, and the per-request files under `raw/` in that directory.
 
-If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. When URL fetching is enabled by the selected engine/mode, the workflow calls `POST /visit` with `{"url": ..., "goal": ...}` first, then falls back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`. The default `search_prime + auto` combination enables this fetch path.
+If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. When URL fetching is enabled by the selected engine/mode, the workflow calls `POST /visit` with `{"url": ..., "goal": ...}` first, then falls back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`. The default `search_plus + auto` combination does not call the visit service; select `search_prime` or use `URL_FETCH_MODE=always` to enable this fetch path.
 
 For the no-paid best-effort path, run the bundled visit server with crawl4ai-first HTML extraction, local PDF extraction, and local Qwen/vLLM goal summaries:
 

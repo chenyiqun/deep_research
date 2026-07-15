@@ -6,7 +6,7 @@ from typing import Any
 
 
 PROD_WEB_SEARCH_ENDPOINT = "http://edithai.devops.xiaohongshu.com/ext-tools/zhipu-web-search-vip"
-DEFAULT_SEARCH_ENGINE = "search_prime"
+DEFAULT_SEARCH_ENGINE = "search_plus"
 
 
 @dataclass(frozen=True)
@@ -26,9 +26,10 @@ class SearchEngineProfile:
         return f"{self.key}_content" if self.native_content else "search_snippet"
 
 
-# `search_live` returns reader-ready Sogou result content. The other engines
-# are treated as discovery/snippet providers in auto mode and therefore use
-# the URL fetcher. Callers can override this with --url-fetch-mode.
+# `search_live` and `search_plus` return reader-ready result content on their
+# supported endpoints. The other engines are treated as discovery/snippet
+# providers in auto mode and therefore use the URL fetcher. Callers can
+# override this with --url-fetch-mode.
 SEARCH_ENGINE_PROFILES: dict[str, SearchEngineProfile] = {
     "search_pro_jina": SearchEngineProfile("search_pro_jina", "jina", False, True, ("search_pro_jina",)),
     "search_prime": SearchEngineProfile("search_prime", "google", False, True, ("search_prime",)),
@@ -47,7 +48,7 @@ SEARCH_ENGINE_PROFILES: dict[str, SearchEngineProfile] = {
         True,
         ("search_pro_quark", "search_lite"),
     ),
-    "search_plus": SearchEngineProfile("search_plus", "baidu", False, True, ("search_plus",)),
+    "search_plus": SearchEngineProfile("search_plus", "baidu", True, False, ("search_plus",)),
 }
 SUPPORTED_SEARCH_ENGINES = tuple(SEARCH_ENGINE_PROFILES)
 URL_FETCH_MODES = ("auto", "always", "never")

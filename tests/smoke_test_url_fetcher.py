@@ -137,7 +137,7 @@ def main() -> None:
     assert not is_probably_pdf("https://example.com/article.html", "text/html")
     assert normalize_visit_endpoint("http://localhost:8765") == "http://localhost:8765/visit"
     assert normalize_visit_endpoint("http://localhost:8765/visit") == "http://localhost:8765/visit"
-    assert DEFAULT_SEARCH_ENGINE == "search_prime"
+    assert DEFAULT_SEARCH_ENGINE == "search_plus"
     assert set(SUPPORTED_SEARCH_ENGINES) == {
         "search_pro_jina",
         "search_prime",
@@ -149,6 +149,7 @@ def main() -> None:
     for engine in SUPPORTED_SEARCH_ENGINES:
         assert WebSearchConfig(search_engine=engine).search_engine == engine
     assert should_fetch_result_pages("search_live", "auto") is False
+    assert should_fetch_result_pages("search_plus", "auto") is False
     assert should_fetch_result_pages("search_prime", "auto") is True
     assert should_fetch_result_pages("search_live", "always") is True
     assert should_fetch_result_pages("search_prime", "never") is False
@@ -187,6 +188,23 @@ def main() -> None:
     assert parsed[0].source_quality == "search_native_content"
     assert parsed[0].extraction_method == "search_live_content"
     assert parsed[0].link == "https://example.com/sogou"
+    baidu = parse_search_results(
+        {
+            "search_result": [
+                {
+                    "title": "Baidu result",
+                    "content": "Complete reader-ready Baidu content.",
+                    "link": "https://example.com/baidu",
+                }
+            ]
+        },
+        "test query",
+        search_engine="search_plus",
+    )
+    assert len(baidu) == 1
+    assert baidu[0].content_kind == "native_content"
+    assert baidu[0].source_quality == "search_native_content"
+    assert baidu[0].extraction_method == "search_plus_content"
     try:
         WebSearchConfig(search_engine="unknown")
     except ValueError:

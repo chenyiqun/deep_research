@@ -477,7 +477,7 @@ def main() -> None:
         "--url-fetch-mode",
         default="auto",
         choices=URL_FETCH_MODES,
-        help="auto follows the search-engine profile; search_live skips page fetching by default.",
+        help="auto follows the search-engine profile; search_plus/search_live skip page fetching.",
     )
     parser.add_argument(
         "--disable-url-fetch",
