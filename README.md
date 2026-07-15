@@ -259,6 +259,20 @@ For the other engines, auto mode fetches each top-k URL and falls back to the se
 fails. Use `--url-fetch-mode always` to force page fetching or `--url-fetch-mode never` to disable it.
 The legacy `--disable-url-fetch` and `URL_FETCH_ENABLED` controls remain compatible.
 
+Test the search endpoint alone, without starting vLLM or fetching result pages:
+
+```bash
+export WEB_SEARCH_API_KEY=<your_prod_web_search_key>
+
+python scripts/test_web_search.py \
+  --query "多智能体 deep research 最新进展" \
+  --search-engine search_live \
+  --search-top-k 5 \
+  --output-file outputs/search_live_test.json
+```
+
+Pass `--all-engines` to test all six search tools in one run.
+
 If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. When URL fetching is enabled by the selected engine/mode, the workflow calls `POST /visit` with `{"url": ..., "goal": ...}` first, then falls back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`. With the default `search_live + auto` combination the visit service is not called; use `URL_FETCH_MODE=always` to force it.
 
 For the no-paid best-effort path, run the bundled visit server with crawl4ai-first HTML extraction, local PDF extraction, and local Qwen/vLLM goal summaries:
