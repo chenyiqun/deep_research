@@ -11,11 +11,11 @@ from tqdm import tqdm
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .evaluate_race import build_item_prompt, score_item
 from .io_utils import (
-    existing_ids,
     filter_tasks,
     index_by_prompt,
     load_jsonl,
     prepare_output_file,
+    retain_successful_resume_rows,
     write_jsonl,
     write_text,
 )
@@ -126,7 +126,14 @@ def infer_retry_max_tokens(
 
 async def run_async(args: argparse.Namespace) -> None:
     tasks = load_jsonl(args.query_file)
-    skip_ids = existing_ids(args.output_file) if args.resume else set()
+    skip_ids = (
+        retain_successful_resume_rows(
+            args.output_file,
+            required_fields=("overall_score",),
+        )
+        if args.resume
+        else set()
+    )
     tasks = filter_tasks(tasks, only_lang=args.only_lang, limit=args.limit, skip_ids=skip_ids)
     target_by_prompt = index_by_prompt(load_jsonl(args.target_file))
     reference_by_prompt = index_by_prompt(load_jsonl(args.reference_file))

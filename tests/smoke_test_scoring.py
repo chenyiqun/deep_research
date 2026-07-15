@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from tempfile import TemporaryDirectory
+from pathlib import Path
+
 from drb_qwen.evaluate_race import build_item_prompt
 from drb_qwen.evaluate_race_async import infer_retry_max_tokens
+from drb_qwen.io_utils import load_jsonl, retain_successful_resume_rows, write_jsonl
 from drb_qwen.scoring import calculate_weighted_scores, normalize_pair_scores, summarize_race
 
 
@@ -61,6 +65,24 @@ def main() -> None:
     )
     assert judge_prompt is None
     assert error and "generation error" in error
+
+    with TemporaryDirectory() as directory:
+        output = Path(directory) / "resume.jsonl"
+        write_jsonl(
+            output,
+            [
+                {"id": 1, "article": "complete"},
+                {"id": 2, "article": "", "error": "retry me"},
+                {"id": 3, "article": ""},
+                {"id": 1, "article": "latest complete"},
+            ],
+        )
+        completed = retain_successful_resume_rows(
+            output,
+            nonempty_string_fields=("article",),
+        )
+        assert completed == {1}
+        assert load_jsonl(output) == [{"id": 1, "article": "latest complete"}]
 
     print("smoke_test_scoring passed")
     print(summary)

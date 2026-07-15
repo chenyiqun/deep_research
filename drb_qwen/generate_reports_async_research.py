@@ -13,7 +13,14 @@ from tqdm import tqdm
 
 from .async_llm_client import AsyncChatClient, AsyncChatConfig
 from .deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
-from .io_utils import existing_ids, filter_tasks, load_jsonl, prepare_output_file, write_jsonl, write_text
+from .io_utils import (
+    filter_tasks,
+    load_jsonl,
+    prepare_output_file,
+    retain_successful_resume_rows,
+    write_jsonl,
+    write_text,
+)
 from .url_fetcher import URLContentFetcher, URLFetchConfig
 from .web_search import (
     DEFAULT_SEARCH_ENGINE,
@@ -262,7 +269,14 @@ def normalize_log_value(value: Any) -> str:
 
 async def run_async(args: argparse.Namespace) -> None:
     tasks = load_jsonl(args.query_file)
-    skip_ids = existing_ids(args.output_file) if args.resume else set()
+    skip_ids = (
+        retain_successful_resume_rows(
+            args.output_file,
+            nonempty_string_fields=("article",),
+        )
+        if args.resume
+        else set()
+    )
     tasks = filter_tasks(tasks, only_lang=args.only_lang, limit=args.limit, skip_ids=skip_ids)
     if not tasks:
         print("No tasks to process.")

@@ -66,6 +66,39 @@ def existing_ids(path: str | Path) -> set[int]:
     return ids
 
 
+def retain_successful_resume_rows(
+    path: str | Path,
+    *,
+    required_fields: tuple[str, ...] = (),
+    nonempty_string_fields: tuple[str, ...] = (),
+) -> set[int]:
+    """Keep only successful rows before resuming and return their task IDs.
+
+    Failed rows must remain retryable. Rewriting the resume file also ensures a
+    later successful retry replaces an earlier error instead of leaving stale
+    duplicate rows that distort evaluation summaries.
+    """
+
+    output_path = Path(path)
+    if not output_path.exists():
+        return set()
+    successful_by_id: dict[int, dict[str, Any]] = {}
+    for row in load_jsonl(output_path):
+        if row.get("error"):
+            continue
+        if any(field not in row for field in required_fields):
+            continue
+        if any(not str(row.get(field, "")).strip() for field in nonempty_string_fields):
+            continue
+        try:
+            task_id = int(row["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        successful_by_id[task_id] = row
+    write_jsonl(output_path, successful_by_id.values(), append=False)
+    return set(successful_by_id)
+
+
 def filter_tasks(
     tasks: list[dict[str, Any]],
     only_lang: str | None = None,
