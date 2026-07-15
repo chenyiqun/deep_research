@@ -18,6 +18,7 @@ PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/drb_qwen_pycache}" \
     drb_qwen/*.py \
     drb_qwen/multi_agent/*.py \
     scripts/download_drb_data.py \
+    scripts/test_all_search_engines.py \
     scripts/test_web_search.py \
     scripts/test_search_url_fetch.py \
     tests/smoke_test_scoring.py \
@@ -33,6 +34,7 @@ PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" -m drb_qwen.evaluate_race --help >/dev/
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" -m drb_qwen.generate_reports_async_research --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" -m drb_qwen.run_multi_agent_research --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" -m drb_qwen.evaluate_race_async --help >/dev/null
+PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_all_search_engines.py --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_web_search.py --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_search_url_fetch.py --help >/dev/null
 

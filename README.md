@@ -277,6 +277,18 @@ python scripts/test_web_search.py \
 
 Pass `--all-engines` to test all six search tools in one run.
 
+For endpoint capability diagnosis, probe every logical engine and every new/legacy API alias while saving
+the complete raw response for each request:
+
+```bash
+python scripts/test_all_search_engines.py \
+  --query "多智能体 deep research 最新进展" \
+  --search-count 10 \
+  --output-dir outputs/all_search_engine_probe
+```
+
+Inspect `summary.json`, `attempts.jsonl`, and the per-request files under `raw/` in that directory.
+
 If you have an AggAgent-style visit backend, set `URL_VISIT_ENDPOINT=http://host:port` or `URL_VISIT_ENDPOINT=http://host:port/visit`. When URL fetching is enabled by the selected engine/mode, the workflow calls `POST /visit` with `{"url": ..., "goal": ...}` first, then falls back to direct HTML/PDF fetching unless `URL_VISIT_FALLBACK_ENABLED=0`. With the default `search_live + auto` combination the visit service is not called; use `URL_FETCH_MODE=always` to force it.
 
 For the no-paid best-effort path, run the bundled visit server with crawl4ai-first HTML extraction, local PDF extraction, and local Qwen/vLLM goal summaries:
