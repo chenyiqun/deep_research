@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from .prompts import RESEARCHER_SYSTEM_PROMPT, build_researcher_step_prompt
@@ -44,7 +45,7 @@ class TokenCounter:
         if self.tokenizer is not None:
             try:
                 encoded = self.tokenizer.encode(str(text), add_special_tokens=False)
-                return max(1, len(encoded))
+                return max(1, encoded_token_length(encoded))
             except Exception:
                 pass
         value = str(text)
@@ -63,17 +64,59 @@ class TokenCounter:
             }
             try:
                 encoded = self.tokenizer.apply_chat_template(messages, **kwargs)
-                return max(1, len(encoded))
+                return max(1, encoded_token_length(encoded))
             except TypeError:
                 kwargs.pop("enable_thinking", None)
                 try:
                     encoded = self.tokenizer.apply_chat_template(messages, **kwargs)
-                    return max(1, len(encoded))
+                    return max(1, encoded_token_length(encoded))
                 except Exception:
                     pass
             except Exception:
                 pass
         return sum(self.count_text(message.get("content", "")) + 8 for message in messages) + 8
+
+
+def encoded_token_length(encoded: Any) -> int:
+    """Count tokens across tokenizer return types without counting container keys.
+
+    Hugging Face/custom tokenizers may return ``list[int]``, a tensor, a
+    ``BatchEncoding``/mapping containing ``input_ids``, or an object exposing an
+    ``input_ids`` attribute.  ``len(BatchEncoding)`` is the number of fields
+    (often 2), not the number of tokens.
+    """
+
+    if encoded is None:
+        return 0
+    if isinstance(encoded, Mapping):
+        if "input_ids" not in encoded:
+            raise TypeError("tokenizer mapping does not contain input_ids")
+        return encoded_token_length(encoded["input_ids"])
+    input_ids = getattr(encoded, "input_ids", None)
+    if input_ids is not None and input_ids is not encoded:
+        return encoded_token_length(input_ids)
+
+    numel = getattr(encoded, "numel", None)
+    if callable(numel):
+        return int(numel())
+
+    if isinstance(encoded, (list, tuple)):
+        if not encoded:
+            return 0
+        if isinstance(encoded[0], (list, tuple)) or hasattr(encoded[0], "shape"):
+            return sum(encoded_token_length(item) for item in encoded)
+        return len(encoded)
+
+    shape = getattr(encoded, "shape", None)
+    if shape is not None:
+        dimensions = [int(value) for value in shape]
+        if dimensions:
+            return math.prod(dimensions)
+
+    try:
+        return len(encoded)
+    except TypeError as exc:
+        raise TypeError(f"unsupported tokenizer output type: {type(encoded).__name__}") from exc
 
 
 @dataclass
@@ -275,6 +318,7 @@ def local_research_view(local: LocalResearchState, recent_observation_limit: int
         "evidence_ids": local.evidence_ids[-160:],
         "claim_ids": local.claim_ids[-160:],
         "gaps": local.gaps[-32:],
+        "resolved_gaps": local.resolved_gaps[-32:],
         "conflicts": local.conflicts[-24:],
         "recent_observations": local.recent_observations[-recent_observation_limit:],
         "tool_calls": local.tool_calls,

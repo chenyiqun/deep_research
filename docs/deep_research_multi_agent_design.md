@@ -1,7 +1,7 @@
 # Deep Research 主代理 + 子代理系统详细设计
 
-版本：v1.0
-日期：2026-07-15
+版本：v1.1
+日期：2026-07-16
 适用项目：本仓库的 Qwen + vLLM + DeepResearch-Bench 流程
 
 > 建议先阅读[系统主流程](./deep_research_end_to_end_flow.md)。本文作为字段、协议、安全、评测和部署细节的扩展说明。
@@ -143,10 +143,10 @@ Main Agent 不应实现为一条从开始持续到结束、不断增长上下文
 |---|---|---|
 | Scope 完成后 | Research Brief、权限、总预算 | 单/多代理路由、初始研究策略 |
 | 初始规划 | 问题、rubric、来源政策 | Question Tree、SubTask DAG |
-| 一批 SubTask 完成后 | 最新 GlobalResearchState、新事件、coverage gap | 新增/取消任务、重规划或等待 |
+| 当前 DAG 的可执行前沿耗尽后 | 最新 GlobalResearchState、新事件、coverage gap | 新增/取消任务、重规划或进入写作 |
 | 发现关键冲突时 | 冲突 Claim、Evidence 引用、剩余预算 | 启动 Verifier 或接受“无法判断” |
 | 研究趋于饱和时 | coverage、边际收益、未决问题 | 继续研究、进入写作或 partial stop |
-| Citation Audit 失败后 | unsupported claims、错误引用 | 定向 repair tasks |
+| Citation Audit 失败后 | unsupported claims、错误引用 | 缺证据时给定向 repair tasks；仅文本问题时给 revision 指令 |
 
 每一次调用都是清晰的 input → LLM inference → structured output。调用结束后，模型进程不需要保持对话连接；下一次调用由 Context Builder 从外部状态重新构造紧凑输入。因此：
 
@@ -712,6 +712,8 @@ Citation Auditor 是发布门禁，不参与自由探索：
 6. 标记 unsupported、partially supported、contradicted、stale。
 7. 生成修复任务，或允许发布。
 
+修复必须区分两类：`requires_search=false` 表示引用格式、删除 unsupported 表述、或根据已有 Evidence 修正主体/范围/关系，直接进入定向 Writer revision；`requires_search=true` 才创建 Researcher repair task。正常 Research 阶段预留最多 20% 的 search/tool/token 总预算供第二类修复使用，避免“Audit 已生成任务但预算已经耗尽”。
+
 ## 5. 自适应单代理 / 多代理路由
 
 ### 5.1 任务特征
@@ -878,7 +880,11 @@ while not terminal(run_id):
         continue
 
     if release_gate.ready_for_draft(snapshot):
-        start_writer_and_auditor(snapshot)
+        start_writer(snapshot)
+        continue
+
+    if snapshot.phase == "AUDITING" and snapshot.article:
+        start_auditor(snapshot)
         continue
 
     await event_bus.wait_for_any(
@@ -894,7 +900,7 @@ while not terminal(run_id):
 Main Agent 不应在每个 URL Reader 完成时都被调用，否则 token 和延迟会失控。State Reducer 可以持续接收细粒度 Reader 结果；Main Agent 只在战略边界被唤醒：
 
 - 初始规划。
-- 当前 wave 达到 batch completion。
+- 当前 DAG 的可执行计划前沿已经耗尽；仅有一次 wave 完成但仍存在 ready/pending 节点时不唤醒。
 - 出现 P0 冲突或关键失败。
 - 当前没有 READY/RUNNING task。
 - coverage 或边际收益跨过阈值。
@@ -911,8 +917,9 @@ Main call 1: scope + initial plan
 → 2 Researcher + 1 Verifier
 → Main call 3: coverage 达标，进入写作
 → Citation Auditor 发现 3 个 unsupported claims
-→ Main call 4: 增加 2 个 repair tasks，删除 1 个 claim
-→ Main call 5: audit 通过，完成
+→ Main call 4: 为确实缺证据的项增加 2 个 repair tasks
+→ Writer 按审计结果删除或收窄另 1 个已有证据不足的表述
+→ Citation Auditor 二次检查通过，完成
 ~~~
 
 #### 6.0.1 Main Agent 是规划完整 DAG，还是只规划当前轮？
@@ -1353,15 +1360,15 @@ Main Agent 提交状态 patch 时必须比较 state_version。版本过期则重
 Bing=`search_pro_ms`、Sogou=`search_live`、Quark=`search_lite`、Baidu=`search_plus`。
 当前部署默认使用已验证可用且直接返回完整内容的 Baidu (`search_plus`)；工具适配层仍兼容全部逻辑引擎，并记录 provider、content kind 和默认 URL fetch 策略。
 
-- `auto`：`search_live` 的返回内容直接进入 Reader；其余引擎抓取结果 URL 后再进入 Reader。
+- `auto`：`search_plus` 与 `search_live` 的返回内容直接进入 Reader；其余引擎抓取结果 URL 后再进入 Reader。
 - `always`：无论引擎都二次抓取，适合强制使用 Visit/Crawl4AI。
 - `never`：无论引擎都只使用搜索接口返回内容。
 
-Sogou 原生结果标记为 `search_native_content`，普通搜索摘要标记为 `search_snippet`。
+Baidu/Sogou 原生结果标记为 `search_native_content`，普通搜索摘要标记为 `search_snippet`。
 对外逻辑名和后端模型代码分离：`search_live` 的候选后端为
 `search_pro_sogou -> search_live`，`search_lite` 的候选后端为
 `search_pro_quark -> search_lite`；只有 1211 模型不存在错误会触发别名回退。
-前者不是“网页已抓取”的同义词，但可以作为 Reader 的直接输入；后者的高置信度会被规则降级。
+该字段描述内容传输/抽取方式，不代表发布者权威性。Source 另存 `source_type`（official、primary、institutional、independent_media、community、aggregator、unknown）和 `authority_score`；非官方/一手来源的 high confidence 会被规则降级。
 所有模式仍要求合法的外部来源 URL，保证 Writer 可以给出可审计引用。
 
 ### 8.2 来源质量分
@@ -1377,6 +1384,7 @@ Quality = 0.30 × Authority
 约束：
 
 - 多篇转载同一新闻稿只算一个 independence group。
+- extraction quality 与 publisher authority 分开计算；搜索接口返回全文不能自动提升 Authority。
 - snippet_only 的 Extractability 设上限。
 - 未提供方法或样本的数字，Directness 降级。
 - 预印本、厂商 benchmark 和匿名材料必须显式标记。
@@ -1428,7 +1436,7 @@ Coverage = 已有有效引用的事实权重之和 / 所有需引用事实权重
 
 ### 9.2 异步但单写者
 
-子代理并行执行，结果可以乱序到达；全局状态由 Main Agent 或 State Reducer 串行提交：
+子代理并行执行，结果可以乱序到达；全局状态只由 State Reducer 串行提交，Main Agent 仅提出 patch：
 
 1. Worker 写不可变 Artifact。
 2. Worker 发完成事件。
@@ -1444,13 +1452,13 @@ Coverage = 已有有效引用的事实权重之和 / 所有需引用事实权重
 | 失败类型 | 策略 |
 |---|---|
 | 搜索 429/5xx | 指数退避 + jitter，最多 2 次，切换备用 provider |
-| URL fetch 超时 | 直接抓取 → visit → snippet 降级；记录 evidence quality |
+| URL fetch 超时 | visit → 直接抓取 fallback → snippet 降级；记录 evidence quality |
 | LLM 网络错误 | 同请求幂等重试 2 次 |
 | JSON 不合法 | 本地 parser 修复一次，再用小模型 schema repair 一次 |
 | Reader 失败 | 不阻塞整轮，返回 partial |
 | Researcher 超时 | 保存部分 Artifact，Main Agent 决定补派或接受 |
 | Main Agent 失败 | 从最近 checkpoint 恢复，不重跑已完成 Artifact |
-| Citation Audit 失败 | 阻止发布，生成定向 repair tasks |
+| Citation Audit 失败 | 阻止发布；缺证据时生成 repair task，仅文本问题时定向重写后复审 |
 
 所有工具调用使用 idempotency key：
 

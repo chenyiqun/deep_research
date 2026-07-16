@@ -11,7 +11,7 @@ from drb_qwen.multi_agent.agents import (
     ResearcherAgent,
     build_semantically_bounded_prompt,
 )
-from drb_qwen.multi_agent.context import ResearcherContextBuilder, TokenCounter
+from drb_qwen.multi_agent.context import ResearcherContextBuilder, TokenCounter, encoded_token_length
 from drb_qwen.multi_agent.inference import AgentInferenceConfig, AgentInferenceGateway
 from drb_qwen.multi_agent.prompts import compact_evidence_packet_json
 from drb_qwen.multi_agent.protocols import RESEARCHER_DECISION_SCHEMA
@@ -130,6 +130,18 @@ class OneClaimTools:
             claims=[claim],
             usage={"search_calls": 1, "reader_calls": 1, "tool_calls": 2},
         )
+
+
+class MappingTokenizer:
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(range(max(1, len(text))))
+
+    def apply_chat_template(self, messages: list[dict[str, str]], **_: Any) -> dict[str, Any]:
+        length = sum(len(message.get("content", "")) for message in messages) + 7
+        return {
+            "input_ids": [list(range(length))],
+            "attention_mask": [[1] * length],
+        }
 
 
 async def check_gateway() -> None:
@@ -281,6 +293,15 @@ async def check_gateway() -> None:
 
 
 def check_context_builder() -> None:
+    assert encoded_token_length({"input_ids": [[1, 2, 3]], "attention_mask": [[1, 1, 1]]}) == 3
+    exact_counter = TokenCounter()
+    exact_counter.tokenizer = MappingTokenizer()
+    short_count = exact_counter.count_messages([{"role": "user", "content": "short"}])
+    long_count = exact_counter.count_messages([{"role": "user", "content": "long" * 100}])
+    assert short_count == 12
+    assert long_count == 407
+    assert long_count > short_count > 2
+
     observations = [
         {"source_id": f"old-{index}", "claim_summaries": ["x" * 3000]}
         for index in range(5)

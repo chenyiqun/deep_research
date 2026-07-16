@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass, replace
 import time
 from typing import Any
@@ -81,6 +82,9 @@ class DeepResearchConfig:
     auditor_max_tokens: int = 3072
     max_audit_rounds: int = 2
     max_repair_tasks: int = 3
+    audit_repair_search_reserve: int = 6
+    audit_repair_tool_reserve: int = 30
+    audit_repair_token_reserve: int = 150_000
     run_state_dir: str = ""
     resume_runs: bool = False
 
@@ -146,6 +150,12 @@ class DeepResearchConfig:
             raise ValueError("max_initial_tasks cannot exceed max_subtasks")
         if self.min_rounds > self.max_rounds:
             raise ValueError("min_rounds cannot exceed max_rounds")
+        if (
+            self.audit_repair_search_reserve < 0
+            or self.audit_repair_tool_reserve < 0
+            or self.audit_repair_token_reserve < 0
+        ):
+            raise ValueError("audit repair reserves must be non-negative")
         output_budgets = {
             "planner": self.planner_max_tokens,
             "reader": self.reader_max_tokens,
@@ -450,15 +460,29 @@ class AsyncDeepResearchWorkflow:
             self.store.save_global(state)
         budget_exhausted = self._budget_exhausted(state)
         if budget_exhausted:
-            state.stop_reason = "research budget exhausted; producing a qualified partial report"
+            gate = evaluate_research_gate(
+                state,
+                min_total_claims=self.config.min_total_claims,
+                min_coverage_ratio=self.config.min_coverage_ratio,
+                budget_exhausted=True,
+            )
+            state.stop_reason = (
+                "" if gate.passed else "research budget exhausted; producing a qualified partial report"
+            )
             state.phase = RunPhase.WRITING
             state.bump_version()
-            self._record(trace, state, "research_budget_exhausted", {"budget": state.budget.to_dict()})
+            self._record(
+                trace,
+                state,
+                "research_budget_exhausted",
+                {"budget": state.budget.to_dict(), "research_gate": gate.__dict__},
+            )
             self.store.save_global(state)
             return
 
-        remaining_tool_budget = max(0, self.config.max_total_tool_calls - state.budget.tool_calls)
-        remaining_search_budget = max(0, self.config.max_total_searches - state.budget.search_calls)
+        tool_limit, search_limit = self._research_limits(state)
+        remaining_tool_budget = max(0, tool_limit - state.budget.tool_calls)
+        remaining_search_budget = max(0, search_limit - state.budget.search_calls)
         minimum_task_budget = 3 if self.config.fetch_full_content and self.content_fetcher is not None else 2
         max_wave_by_budget = remaining_tool_budget // minimum_task_budget
         ready = ready_tasks(
@@ -570,6 +594,43 @@ class AsyncDeepResearchWorkflow:
             min_coverage_ratio=self.config.min_coverage_ratio,
             budget_exhausted=budget_exhausted,
         )
+        completed_waves = sum(1 for event in trace if event.get("type") == "scheduler_wave_completed")
+        if budget_exhausted:
+            state.phase = RunPhase.WRITING
+            state.stop_reason = (
+                "" if gate.passed else "research budget exhausted; producing a qualified partial report"
+            )
+            state.bump_version()
+            self._record(
+                trace,
+                state,
+                "research_budget_exhausted",
+                {"budget": state.budget.to_dict(), "research_gate": gate.__dict__},
+            )
+            self.store.save_global(state)
+            return
+        unfinished_task_ids = [
+            task.id
+            for task in state.tasks.values()
+            if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+        ]
+        # Do not ask Main to rediscover gaps that are already assigned to the
+        # current DAG.  Exhaust the plan (including newly-ready dependents)
+        # before a strategic replan.  This is the main duplicate-task guard.
+        if unfinished_task_ids and not budget_exhausted:
+            self._record(
+                trace,
+                state,
+                "main_replan_deferred",
+                {
+                    "reason": "existing DAG still has unfinished work",
+                    "task_ids": unfinished_task_ids,
+                    "research_gate": gate.__dict__,
+                },
+            )
+            self.store.save_global(state)
+            return
+
         action = "continue"
         patch_result: dict[str, Any] = {}
         if state.main_round < self.config.max_rounds:
@@ -614,7 +675,6 @@ class AsyncDeepResearchWorkflow:
         elif all_tasks_terminal(state):
             action = "write" if state.claims else "partial"
 
-        completed_waves = sum(1 for event in trace if event.get("type") == "scheduler_wave_completed")
         has_unfinished_work = any(
             task.status in {TaskStatus.PENDING, TaskStatus.RUNNING} for task in state.tasks.values()
         )
@@ -688,6 +748,24 @@ class AsyncDeepResearchWorkflow:
             self.store.save_global(state)
             return
 
+        search_repairs = [
+            item
+            for item in audit.repair_tasks
+            if bool(item.get("requires_search", True))
+        ]
+        if not search_repairs:
+            state.phase = RunPhase.WRITING
+            state.stop_reason = ""
+            state.bump_version()
+            self._record(
+                trace,
+                state,
+                "audit_revision_planned",
+                {"repair_tasks": audit.repair_tasks, "mode": "rewrite_only"},
+            )
+            self.store.save_global(state)
+            return
+
         decision, _, used_fallback = await self._call_main_replan(state, allow_over_round_limit=True)
         if self._sync_cancelled(state):
             return
@@ -718,8 +796,25 @@ class AsyncDeepResearchWorkflow:
             added = compiled.added_task_ids
             warnings = [str(exc), *compiled.warnings]
             used_fallback = True
+        if not added and search_repairs:
+            fallback = audit_repair_patch(state)
+            compiled = apply_decision_patch(
+                state,
+                fallback,
+                max_subtasks=self.config.max_subtasks,
+                max_steps=self.config.max_react_steps,
+                max_tool_calls=self.config.max_tool_calls_per_subtask,
+                max_new_tasks=self.config.max_repair_tasks,
+            )
+            added = compiled.added_task_ids
+            warnings = [*warnings, "Main repair patch produced no executable task; used audit repair items.", *compiled.warnings]
+            used_fallback = True
         initialize_coverage(state)
-        if not added:
+        rewrite_requested = any(not bool(item.get("requires_search", True)) for item in audit.repair_tasks)
+        if not added and rewrite_requested:
+            state.phase = RunPhase.WRITING
+            state.stop_reason = ""
+        elif not added:
             state.phase = RunPhase.PARTIAL
             state.stop_reason = "audit repair produced no new executable task"
         else:
@@ -750,11 +845,48 @@ class AsyncDeepResearchWorkflow:
 
     def _budget_exhausted(self, state: GlobalResearchState) -> bool:
         minimum_task_budget = 3 if self.config.fetch_full_content and self.content_fetcher is not None else 2
+        tool_limit, search_limit = self._research_limits(state)
         return (
-            self.config.max_total_tool_calls - state.budget.tool_calls < minimum_task_budget
-            or state.budget.search_calls >= self.config.max_total_searches
-            or state.budget.total_tokens >= self.config.max_total_tokens
+            tool_limit - state.budget.tool_calls < minimum_task_budget
+            or state.budget.search_calls >= search_limit
+            or state.budget.total_tokens >= self._token_limit(state)
         )
+
+    def _research_limits(self, state: GlobalResearchState) -> tuple[int, int]:
+        """Reserve real tool/search capacity for post-draft citation repair."""
+
+        repair_phase = self._repair_budget_active(state)
+        if repair_phase or not self.config.citation_audit_enabled:
+            return self.config.max_total_tool_calls, self.config.max_total_searches
+        minimum_task_budget = 3 if self.config.fetch_full_content and self.content_fetcher is not None else 2
+        tool_reserve = min(
+            self.config.audit_repair_tool_reserve,
+            self.config.max_total_tool_calls // 5,
+            max(0, self.config.max_total_tool_calls - minimum_task_budget),
+        )
+        search_reserve = min(
+            self.config.audit_repair_search_reserve,
+            self.config.max_total_searches // 5,
+            max(0, self.config.max_total_searches - 1),
+        )
+        return (
+            self.config.max_total_tool_calls - tool_reserve,
+            self.config.max_total_searches - search_reserve,
+        )
+
+    def _token_limit(self, state: GlobalResearchState) -> int:
+        if self._repair_budget_active(state) or not self.config.citation_audit_enabled:
+            return self.config.max_total_tokens
+        reserve = min(
+            self.config.audit_repair_token_reserve,
+            self.config.max_total_tokens // 5,
+            max(0, self.config.max_total_tokens - 1),
+        )
+        return self.config.max_total_tokens - reserve
+
+    @staticmethod
+    def _repair_budget_active(state: GlobalResearchState) -> bool:
+        return state.audit_round > 0 and bool(state.audit and not state.audit.passed)
 
     @staticmethod
     def _release_phase(state: GlobalResearchState) -> RunPhase:
@@ -793,6 +925,7 @@ class AsyncDeepResearchWorkflow:
             "state": state.to_dict(),
             "trace": trace,
             "audit": state.audit.to_dict() if state.audit else None,
+            "diagnostics": runtime_diagnostics(state, trace),
         }
         metrics = getattr(self.llm, "metrics", None)
         if metrics is not None and hasattr(metrics, "to_dict"):
@@ -818,6 +951,44 @@ def same_research_task(persisted: dict[str, Any], requested: dict[str, Any]) -> 
     persisted_id = normalize_text(persisted.get("id", ""))
     requested_id = normalize_text(requested.get("id", ""))
     return not (persisted_id and requested_id and persisted_id != requested_id)
+
+
+def runtime_diagnostics(
+    state: GlobalResearchState,
+    trace: list[dict[str, Any]],
+) -> dict[str, Any]:
+    queries: list[str] = []
+    empty_query_steps = 0
+    finish_requests = 0
+    for event in trace:
+        if event.get("type") != "researcher_step":
+            continue
+        payload = event.get("payload", {})
+        values = payload.get("queries", []) if isinstance(payload, dict) else []
+        if not values:
+            empty_query_steps += 1
+        queries.extend(str(value) for value in values if str(value).strip())
+        if isinstance(payload, dict) and payload.get("finish_requested"):
+            finish_requests += 1
+    normalized_queries = [normalize_text(query) for query in queries]
+    source_types = Counter(source.source_type for source in state.sources.values())
+    high_authority = sum(1 for source in state.sources.values() if source.authority_score >= 0.8)
+    return {
+        "task_statuses": dict(Counter(task.status.value for task in state.tasks.values())),
+        "coverage_statuses": dict(Counter(state.coverage.values())),
+        "source_types": dict(source_types),
+        "high_authority_source_ratio": (
+            high_authority / len(state.sources) if state.sources else 0.0
+        ),
+        "evidence_confidence": dict(Counter(item.confidence for item in state.evidence.values())),
+        "evidence_relations": dict(Counter(item.relation for item in state.evidence.values())),
+        "query_calls": len(queries),
+        "unique_queries": len(set(normalized_queries)),
+        "duplicate_query_calls": len(queries) - len(set(normalized_queries)),
+        "empty_query_steps": empty_query_steps,
+        "finish_requested_steps": finish_requests,
+        "active_gap_count": len(state.gaps),
+    }
 
 
 def failed_bundle(state: GlobalResearchState, subtask_id: str, exc: Any) -> ResearchExecutionBundle:
@@ -848,6 +1019,8 @@ def audit_repair_patch(state: GlobalResearchState) -> dict[str, Any]:
     repair_tasks = state.audit.repair_tasks if state.audit else []
     operations: list[dict[str, Any]] = []
     for index, item in enumerate(repair_tasks, 1):
+        if not bool(item.get("requires_search", True)):
+            continue
         objective = str(item.get("objective", "")).strip()
         if not objective:
             continue

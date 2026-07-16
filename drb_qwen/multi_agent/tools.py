@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from ..json_utils import extract_json
@@ -10,7 +11,7 @@ from ..web_search import SearchResult, WebSearchClient
 from .llm import add_token_usage, call_chat
 from .prompts import READER_SYSTEM_PROMPT, build_reader_prompt
 from .protocols import READER_SCHEMA
-from .security import source_independence_group, validate_external_url
+from .security import classify_source_authority, source_independence_group, validate_external_url
 from .schemas import (
     ClaimRecord,
     EvidenceRecord,
@@ -197,10 +198,18 @@ class ResearchTools:
                     excerpt = str(claim_item.get("excerpt", claim_item.get("evidence", ""))).strip()
                     if not claim_text or not excerpt:
                         continue
-                    if not excerpt_is_grounded(excerpt, source_text):
+                    if not excerpt_is_grounded(excerpt, source_text) or not claim_preserves_scope(
+                        claim_text,
+                        excerpt,
+                    ):
                         rejected_claims += 1
                         continue
-                    confidence = normalize_confidence(claim_item.get("confidence"), source.source_quality)
+                    confidence = normalize_confidence(
+                        claim_item.get("confidence"),
+                        source.source_quality,
+                        source.source_type,
+                        source.authority_score,
+                    )
                     relation = str(claim_item.get("relation", "supports")).lower()
                     if relation not in {"supports", "refutes", "qualifies"}:
                         relation = "supports"
@@ -240,6 +249,8 @@ class ResearchTools:
                     "source_title": source.title,
                     "source_url": source.url,
                     "source_quality": source.source_quality,
+                    "source_type": source.source_type,
+                    "authority_score": source.authority_score,
                     "relevance": relevance,
                     "claim_ids": source_claim_ids,
                     "evidence_ids": source_evidence_ids,
@@ -254,7 +265,7 @@ class ResearchTools:
             )
             if rejected_claims:
                 output.errors.append(
-                    f"reader returned {rejected_claims} excerpt(s) not found in source text: {source.url}"
+                    f"reader returned {rejected_claims} excerpt(s) that failed grounding/scope checks: {source.url}"
                 )
 
         output.claims = list(claims_by_id.values())
@@ -304,6 +315,7 @@ class ResearchTools:
             else (result.extraction_method or "search_snippet")
         )
         source_id = stable_id("src", result.link or result.title, result.publish_date)
+        source_type, authority_score = classify_source_authority(result.link, result.title)
         artifact_id = stable_id("art", run_id, source_id, content_hash(full_text or source_text))
         artifact_text = full_text if used_full_text else source_text
         artifact_path = self.store.save_artifact(
@@ -318,6 +330,8 @@ class ResearchTools:
                 "search_engine": result.search_engine,
                 "content_kind": result.content_kind,
                 "source_quality": quality,
+                "source_type": source_type,
+                "authority_score": authority_score,
             },
         )
         source = SourceRecord(
@@ -328,6 +342,8 @@ class ResearchTools:
             publish_date=result.publish_date,
             media=result.media,
             source_quality=quality,
+            source_type=source_type,
+            authority_score=authority_score,
             extraction_method=extraction_method,
             independence_group=source_independence_group(result.link),
             artifact_id=artifact_id if artifact_path else "",
@@ -341,6 +357,8 @@ class ResearchTools:
                 "search_engine": result.search_engine,
                 "content_kind": result.content_kind,
                 "source_quality": quality,
+                "source_type": source_type,
+                "authority_score": authority_score,
                 "reader_content_chars": len(source_text),
                 "artifact_id": source.artifact_id,
             }
@@ -416,11 +434,21 @@ def source_quality(
     return fallback_quality or "snippet_only"
 
 
-def normalize_confidence(value: Any, quality: str) -> str:
+def normalize_confidence(
+    value: Any,
+    quality: str,
+    source_type: str = "unknown",
+    authority_score: float = 0.5,
+) -> str:
     confidence = str(value or "medium").lower()
     if confidence not in {"high", "medium", "low"}:
         confidence = "medium"
     if quality in {"snippet_only", "search_snippet", "fetch_failed"} and confidence == "high":
+        return "medium"
+    if confidence == "high" and (
+        source_type in {"community", "aggregator", "unknown", "independent_media"}
+        or safe_float(authority_score, 0.5) < 0.8
+    ):
         return "medium"
     return confidence
 
@@ -431,6 +459,31 @@ def excerpt_is_grounded(excerpt: str, source_text: str) -> bool:
     normalized_excerpt = " ".join(str(excerpt).split()).casefold()
     normalized_source = " ".join(str(source_text).split()).casefold()
     return bool(normalized_excerpt and normalized_excerpt in normalized_source)
+
+
+CLAIM_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
+SCOPE_GROUPS = (
+    ("全国", "全中国", "中国全国", "national", "nationwide"),
+    ("地方政府", "地方财政", "地方税收", "地方一般公共预算", "local government", "local fiscal"),
+    ("全球", "全世界", "worldwide", "global"),
+    ("省级", "全省", "某省", "provincial", "province-wide"),
+)
+
+
+def claim_preserves_scope(claim: str, excerpt: str) -> bool:
+    """Reject direct evidence claims that add numbers or a new statistical scope."""
+
+    claim_text = normalize_text(claim)
+    excerpt_text = normalize_text(excerpt)
+    excerpt_numbers = set(CLAIM_NUMBER_RE.findall(excerpt_text))
+    if any(number not in excerpt_numbers for number in CLAIM_NUMBER_RE.findall(claim_text)):
+        return False
+    for group in SCOPE_GROUPS:
+        claim_has_scope = any(marker in claim_text for marker in group)
+        excerpt_has_scope = any(marker in excerpt_text for marker in group)
+        if claim_has_scope and not excerpt_has_scope:
+            return False
+    return True
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:

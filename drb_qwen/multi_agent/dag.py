@@ -14,6 +14,7 @@ from .schemas import (
     safe_int,
     stable_id,
     string_list,
+    texts_semantically_equivalent,
     utc_now,
 )
 
@@ -138,7 +139,7 @@ def apply_decision_patch(
                 max_tool_calls=max_tool_calls,
                 created_by=f"main:round:{state.main_round}",
             )
-            duplicate = find_duplicate_objective(candidate, task.objective)
+            duplicate = find_duplicate_task(candidate, task)
             if duplicate:
                 result.warnings.append(f"duplicate objective ignored; existing task={duplicate}")
                 continue
@@ -228,11 +229,56 @@ def all_tasks_terminal(state: GlobalResearchState) -> bool:
     } for task in state.tasks.values())
 
 
-def find_duplicate_objective(tasks: dict[str, SubTask], objective: str) -> str:
-    normalized = normalize_text(objective)
+TASK_CONCEPT_PATTERNS = {
+    "list": ("名单", "名录", "list", "ranking members"),
+    "basic_info": ("基本信息", "基础信息", "basic information", "profile"),
+    "finance": ("融资", "financing", "funding", "capital raising"),
+    "dividend": ("分红", "股息", "dividend", "distribution"),
+    "credit": ("信誉", "信用评级", "credibility", "credit rating"),
+    "growth": ("增长", "增幅", "growth", "cagr"),
+    "history": ("历史数据", "历史走势", "historical data", "price history"),
+    "support": ("支撑", "support level", "support levels"),
+    "resistance": ("压力位", "阻力位", "resistance", "resistance level"),
+    "impact": ("影响幅度", "具体影响", "量化", "quantify", "impact magnitude"),
+    "composition": ("收入构成", "完整构成", "composition", "breakdown"),
+}
+
+
+def _task_concepts(task: SubTask) -> set[str]:
+    haystack = normalize_text(" ".join([task.objective, *task.coverage_targets]))
+    return {
+        concept
+        for concept, patterns in TASK_CONCEPT_PATTERNS.items()
+        if any(pattern in haystack for pattern in patterns)
+    }
+
+
+def find_duplicate_task(tasks: dict[str, SubTask], incoming: SubTask) -> str:
+    incoming_targets = {normalize_text(value) for value in incoming.coverage_targets if normalize_text(value)}
+    incoming_concepts = _task_concepts(incoming)
     for task_id, task in tasks.items():
-        if normalize_text(task.objective) == normalized and task.status != TaskStatus.CANCELLED:
-            return task_id
+        if task.status == TaskStatus.CANCELLED:
+            continue
+        if texts_semantically_equivalent(task.objective, incoming.objective):
+            if incoming.task_type == TaskType.RESEARCH or task.task_type == incoming.task_type:
+                return task_id
+        # Research tasks must not be recreated merely to revisit an already
+        # assigned coverage slot.  Verification/repair tasks are intentionally
+        # allowed to overlap an earlier research task.
+        if task.task_type == incoming.task_type == TaskType.RESEARCH:
+            existing_targets = {
+                normalize_text(value) for value in task.coverage_targets if normalize_text(value)
+            }
+            if incoming_targets & existing_targets:
+                return task_id
+            existing_concepts = _task_concepts(task)
+            if len(incoming_concepts) >= 2 and len(existing_concepts) >= 2:
+                overlap = len(incoming_concepts & existing_concepts) / min(
+                    len(incoming_concepts),
+                    len(existing_concepts),
+                )
+                if overlap >= 0.8:
+                    return task_id
     return ""
 
 

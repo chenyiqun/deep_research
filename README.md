@@ -113,9 +113,9 @@ ResearchRun + GlobalResearchState
 -> every ReAct step is a separate inference request; tools run after that request releases
 -> Search / Fetch / Reader produce Source, Evidence, and Claim records
 -> deterministic Reducers merge AgentResult objects
--> Main incrementally patches the DAG at strategic boundaries
--> Writer generates only from the evidence packet
--> Citation Auditor passes or creates targeted repair tasks
+-> Scheduler exhausts the current DAG frontier before Main may incrementally patch it
+-> Writer consumes a coverage-balanced, authority-ranked evidence dossier
+-> Citation Auditor passes, requests draft-only revision, or creates targeted research tasks
 -> final report remains compatible with RACE and FACT evaluation
 ```
 
@@ -146,6 +146,13 @@ whitespace normalization. Invalid/private source URLs and orphaned
 Source/Evidence/Claim references are rejected before they enter global state.
 Per-wave search allocations enforce the global search-call ceiling even when
 multiple Researchers run concurrently.
+
+`search_native_content` describes how text reached the Reader; it is not a
+publisher-quality grade. Every Source also records `source_type` and
+`authority_score`, so official/primary material, independent media, and
+community/aggregator pages are calibrated separately. Reader claims that add a
+number or broaden national/local/global scope beyond the quoted excerpt are
+rejected deterministically.
 
 Start Qwen3-32B as a vLLM server:
 
@@ -192,6 +199,9 @@ URL_FETCH_TIMEOUT_S=30 \
 MAX_ROUNDS=3 \
 MAX_SEARCH_QUERIES_PER_ROUND=3 \
 SEARCH_TOP_K=5 \
+AUDIT_REPAIR_SEARCH_RESERVE=6 \
+AUDIT_REPAIR_TOOL_RESERVE=30 \
+AUDIT_REPAIR_TOKEN_RESERVE=150000 \
 bash scripts/launch_qwen3_32b_async_research_bg.sh
 ```
 
@@ -210,6 +220,10 @@ race_summary.json                       # aggregate RACE scores
 traces/<id>.json                        # per-task search/read/state trace
 run_state/<run_id>/                     # durable global/local state, events, bundles, artifacts
 ```
+
+Each result/trace now includes `diagnostics` with task/coverage status counts,
+source-type distribution, high-authority source ratio, evidence relations,
+query duplication, empty-query steps, and the bounded active-gap count.
 
 ### Run one arbitrary research question
 
@@ -237,8 +251,9 @@ Important runtime controls include:
 - `--max-subtasks` and `--max-rounds`: dynamic DAG and Main planning limits.
 - `--max-total-tool-calls`, `--max-total-searches`, and `--max-total-tokens`: run budgets.
 - `--max-audit-rounds`: Citation Audit and targeted repair limit.
+- `--audit-repair-search-reserve`, `--audit-repair-tool-reserve`, and `--audit-repair-token-reserve`: capacity withheld from normal research and released after a failed draft audit (each capped at 20% of its corresponding total budget).
 - `--run-state-dir` / `--resume-runs`: checkpoint and recovery behavior.
-- `--max-model-len`, `--context-safety-tokens`, and `--tokenizer-path`: token-aware input budgeting.
+- `--max-model-len`, `--context-safety-tokens`, and `--tokenizer-path`: token-aware input budgeting. Custom/Hugging Face `BatchEncoding` results are counted from `input_ids`, never from mapping field count.
 - `--state-prompt-max-chars` and `--evidence-prompt-max-chars`: first-stage structured Writer/Auditor compaction limits. The runtime then measures the rendered chat template, samples complete evidence objects until it fits, and retains a final gateway-level truncation/retry guard for tokenizer mismatches.
 - `--max-concurrent-control-calls`, `--max-concurrent-long-calls`, and `--max-inflight-llm-tokens`: role-aware admission control.
 - `--forward-vllm-priority`: forward Main/Researcher/Reader/Writer priority to a vLLM server started with priority scheduling.

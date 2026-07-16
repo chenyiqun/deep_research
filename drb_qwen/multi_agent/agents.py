@@ -5,6 +5,7 @@ import re
 from typing import Any, Callable
 
 from ..json_utils import extract_json
+from ..url_utils import canonicalize_url, extract_urls
 from .context import ContextWindowExceeded, ResearcherContextBuilder, TokenCounter
 from .inference import is_context_length_error
 from .llm import add_token_usage, call_chat
@@ -33,6 +34,7 @@ from .schemas import (
     normalize_text,
     safe_int,
     string_list,
+    texts_semantically_equivalent,
     utc_now,
 )
 from .protocols import (
@@ -45,7 +47,6 @@ from .store import RunStore
 from .tools import ResearchTools
 
 
-URL_RE = re.compile(r"https?://[^\s\])}>\"']+")
 REACT_STEP_TERMINAL = "__react_step_terminal__"
 
 
@@ -302,22 +303,51 @@ class ResearcherAgent:
                 else:
                     decision = parsed_decision
                 local.step += 1
-                add_local_semantic_patch(local, decision)
 
                 queries = extract_search_queries(decision, allowed_queries)
-                query_seen = {normalize_text(query) for query in local.queries}
-                queries = [query for query in queries if normalize_text(query) not in query_seen]
+                prior_queries = [*state.query_ledger, *local.queries]
+                queries = [
+                    query
+                    for query in queries
+                    if not any(
+                        texts_semantically_equivalent(query, prior, threshold=0.94)
+                        for prior in prior_queries
+                    )
+                ]
                 max_affordable_queries = min(
                     max(0, subtask.max_tool_calls - local.tool_calls),
                     max(0, max_search_calls - usage["search_calls"]),
                 )
                 queries = queries[:max_affordable_queries]
                 finish_requested = bool(decision.get("finish", False))
-                finish_effective = finish_requested and not queries
-                if finish_requested != finish_effective:
+                assessment = decision.get("assessment", {})
+                assessment_coverage = (
+                    str(assessment.get("coverage", "none")).lower()
+                    if isinstance(assessment, dict)
+                    else "none"
+                )
+                finish_effective = (
+                    finish_requested or assessment_coverage == "sufficient"
+                ) and not queries
+                if queries and (finish_requested or assessment_coverage == "sufficient"):
                     decision = dict(decision)
                     decision["finish"] = False
                     decision["stop_reason"] = ""
+                    assessment_value = decision.get("assessment", {})
+                    if isinstance(assessment_value, dict):
+                        decision["assessment"] = {
+                            **assessment_value,
+                            "coverage": "partial",
+                            "primary_gap": assessment_value.get("primary_gap")
+                            or "new search observations still require a later synthesis step",
+                        }
+                elif finish_effective and not finish_requested:
+                    # Treat an explicit sufficient assessment as the terminal
+                    # signal even when the model omitted the redundant flag.
+                    decision = dict(decision)
+                    decision["finish"] = True
+                    decision.setdefault("stop_reason", "evidence sufficient")
+                add_local_semantic_patch(local, decision)
                 last_decision = decision
 
                 event: dict[str, Any] = {
@@ -373,8 +403,7 @@ class ResearcherAgent:
                 event["output_state_version"] = local.version
                 step_should_stop = (
                     finish_effective
-                    or (not queries and bool(claims))
-                    or (not queries and not claims and local.step >= subtask.max_steps)
+                    or (not queries and local.step >= subtask.max_steps)
                 )
                 local.stop_reason = REACT_STEP_TERMINAL if step_should_stop else ""
                 local.updated_at = utc_now()
@@ -399,10 +428,22 @@ class ResearcherAgent:
         summary = str(last_decision.get("answer_summary", "")).strip()
         if not summary:
             summary = summarize_claims(claims)
+        final_assessment = last_decision.get("assessment", {})
+        final_coverage = (
+            str(
+                final_assessment.get(
+                    "coverage",
+                    "sufficient" if last_decision.get("finish", False) else "none",
+                )
+            ).lower()
+            if isinstance(final_assessment, dict)
+            else "none"
+        )
+        terminal_decision = bool(last_decision.get("finish", False)) or final_coverage == "sufficient"
         if fatal_error and not claims:
             status = TaskStatus.FAILED
             stop_reason = "researcher runtime failed"
-        elif claims and bool(last_decision.get("finish", False)):
+        elif claims and terminal_decision and final_coverage == "sufficient":
             status = TaskStatus.COMPLETED
             stop_reason = str(last_decision.get("stop_reason", "evidence sufficient"))
         elif claims:
@@ -429,6 +470,7 @@ class ResearcherAgent:
             evidence_ids=list(evidence),
             source_ids=list(sources),
             unresolved_gaps=local.gaps,
+            resolved_gaps=local.resolved_gaps,
             conflicts=local.conflicts,
             suggested_followups=string_list(last_decision.get("suggested_followups"), 10),
             usage=usage,
@@ -643,14 +685,31 @@ class CitationAuditor:
         else:
             parsed["passed"] = safe_bool(parsed.get("passed"))
             parsed["issues"] = [item for item in parsed.get("issues", []) if isinstance(item, dict)]
-            parsed["repair_tasks"] = [
-                item for item in parsed.get("repair_tasks", []) if isinstance(item, dict)
-            ][: self.max_repair_tasks]
+            normalized_repairs: list[dict[str, Any]] = []
+            for item in parsed.get("repair_tasks", []):
+                if not isinstance(item, dict):
+                    continue
+                repair = dict(item)
+                repair_kind = str(repair.get("repair_kind", "research")).strip().lower()
+                repair["repair_kind"] = repair_kind if repair_kind in {"research", "rewrite"} else "research"
+                repair["requires_search"] = (
+                    safe_bool(repair["requires_search"])
+                    if "requires_search" in repair
+                    else repair["repair_kind"] != "rewrite"
+                )
+                normalized_repairs.append(repair)
+            parsed["repair_tasks"] = normalized_repairs[: self.max_repair_tasks]
             audit = AuditResult.from_dict(parsed)
 
-        exact_urls = {source.url for source in state.sources.values() if source.url}
-        cited_urls = {url.rstrip(".,;:") for url in URL_RE.findall(state.article)}
-        unknown_urls = sorted(cited_urls - exact_urls)
+        exact_urls = {
+            canonicalize_url(source.url): source.url
+            for source in state.sources.values()
+            if canonicalize_url(source.url)
+        }
+        cited_urls = {
+            canonicalize_url(url): url for url in extract_urls(state.article) if canonicalize_url(url)
+        }
+        unknown_urls = sorted(cited_urls[key] for key in cited_urls.keys() - exact_urls.keys())
         if unknown_urls:
             audit.passed = False
             audit.issues.append(
@@ -666,9 +725,11 @@ class CitationAuditor:
                     {
                         "objective": "Replace unregistered citation URLs with evidence-store sources or remove the unsupported statements.",
                         "coverage_targets": ["audit:citation_url_validity"],
+                        "repair_kind": "rewrite",
+                        "requires_search": False,
                     }
                 )
-        if state.claims and not cited_urls.intersection(exact_urls):
+        if state.claims and not cited_urls.keys() & exact_urls.keys():
             audit.passed = False
             audit.issues.append(
                 {
@@ -683,6 +744,8 @@ class CitationAuditor:
                     {
                         "objective": "Verify the report's major factual claims and provide exact source URLs for citation repair.",
                         "coverage_targets": ["audit:citation_coverage"],
+                        "repair_kind": "rewrite",
+                        "requires_search": False,
                     }
                 )
         if not state.article.strip():
@@ -727,6 +790,7 @@ def fallback_initial_plan(task: dict[str, Any], raw_response: str, max_tasks: in
             "coverage_targets": [coverage[index - 1]],
             "depends_on": [],
             "priority": 80 - index,
+            "required_source_types": ["primary", "independent"],
         }
         for index, objective in enumerate(objectives, 1)
     ]
@@ -802,7 +866,30 @@ def extract_search_queries(decision: dict[str, Any], limit: int) -> list[str]:
 
 
 def add_local_semantic_patch(local: LocalResearchState, decision: dict[str, Any]) -> None:
-    append_unique(local.gaps, string_list(decision.get("add_gaps"), 20))
+    assessment = decision.get("assessment", {})
+    if isinstance(assessment, dict):
+        coverage = str(assessment.get("coverage", "none")).lower()
+        primary_gap = str(assessment.get("primary_gap", "")).strip()
+        if coverage == "sufficient":
+            local.gaps = []
+        elif primary_gap:
+            append_semantic_unique(local.gaps, [primary_gap], max_items=40)
+    resolved = string_list(decision.get("resolved_gaps"), 20)
+    if resolved:
+        append_semantic_unique(local.resolved_gaps, resolved, max_items=40)
+        local.gaps = [
+            gap
+            for gap in local.gaps
+            if not any(texts_semantically_equivalent(gap, item) for item in resolved)
+        ]
+    added_gaps = string_list(decision.get("add_gaps"), 20)
+    if added_gaps:
+        local.resolved_gaps = [
+            gap
+            for gap in local.resolved_gaps
+            if not any(texts_semantically_equivalent(gap, item) for item in added_gaps)
+        ]
+    append_semantic_unique(local.gaps, added_gaps, max_items=40)
     conflicts = decision.get("add_conflicts", [])
     if isinstance(conflicts, list):
         local.conflicts.extend(item for item in conflicts if isinstance(item, dict))
@@ -818,7 +905,6 @@ def add_tool_result_to_local(local: LocalResearchState, queries: list[str], resu
     local.recent_observations.extend(result.observations)
     local.recent_observations = local.recent_observations[-8:]
     for observation in result.observations:
-        append_unique(local.gaps, string_list(observation.get("gaps"), 10))
         conflicts = observation.get("conflicts", [])
         if isinstance(conflicts, list):
             local.conflicts.extend(item for item in conflicts if isinstance(item, dict))
@@ -831,6 +917,16 @@ def append_unique(target: list[str], values: list[str]) -> None:
         if key and key not in seen:
             target.append(value)
             seen.add(key)
+
+
+def append_semantic_unique(target: list[str], values: list[str], *, max_items: int) -> None:
+    for value in values:
+        text = str(value or "").strip()
+        if not text or any(texts_semantically_equivalent(text, existing) for existing in target):
+            continue
+        target.append(text)
+        if len(target) >= max(1, int(max_items)):
+            break
 
 
 def summarize_claims(claims: dict[str, ClaimRecord]) -> str:
@@ -858,6 +954,7 @@ def build_global_context_slice(state: GlobalResearchState, subtask: SubTask) -> 
         )
     return {
         "subtask_coverage_targets": subtask.coverage_targets,
+        "global_query_ledger": state.query_ledger[-128:],
         "existing_claims": claims,
         "global_gaps": state.gaps[-20:],
         "global_conflicts": state.conflicts[-20:],
@@ -892,11 +989,14 @@ def build_evidence_packet(state: GlobalResearchState) -> list[dict[str, Any]]:
                 "source_url": source.url,
                 "publish_date": source.publish_date,
                 "source_quality": source.source_quality,
+                "source_type": source.source_type,
+                "authority_score": source.authority_score,
                 "independence_group": source.independence_group,
             }
             evidence_items.append(item)
             by_relation.setdefault(evidence.relation, []).append(item)
         if evidence_items:
+            task = state.tasks.get(claim.subtask_id)
             packet.append(
                 {
                     "claim_id": claim.id,
@@ -904,13 +1004,65 @@ def build_evidence_packet(state: GlobalResearchState) -> list[dict[str, Any]]:
                     "confidence": claim.confidence,
                     "status": claim.status,
                     "qualifiers": claim.qualifiers,
+                    "subtask_id": claim.subtask_id,
+                    "subtask_objective": task.objective if task else "",
+                    "coverage_targets": list(task.coverage_targets) if task else [],
                     "evidence": evidence_items,
                     "supports": by_relation["supports"],
                     "refutes": by_relation["refutes"],
                     "qualifies": by_relation["qualifies"],
                 }
             )
-    return packet
+    return order_evidence_packet(state, packet)
+
+
+def order_evidence_packet(
+    state: GlobalResearchState,
+    packet: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank evidence quality while round-robining across deliverable coverage."""
+
+    def score(item: dict[str, Any]) -> float:
+        status_score = {
+            "corroborated": 5.0,
+            "qualified": 3.0,
+            "single_source": 2.0,
+            "contested": 1.5,
+            "disputed": 0.5,
+        }.get(str(item.get("status", "")), 1.0)
+        evidence_items = item.get("evidence", []) if isinstance(item.get("evidence"), list) else []
+        authority = max(
+            (float(value.get("authority_score", 0.0)) for value in evidence_items if isinstance(value, dict)),
+            default=0.0,
+        )
+        independent_groups = {
+            str(value.get("independence_group", ""))
+            for value in evidence_items
+            if isinstance(value, dict) and value.get("independence_group")
+        }
+        quantitative = 0.75 if re.search(r"\d", str(item.get("claim", ""))) else 0.0
+        return status_score + authority * 3.0 + min(2, len(independent_groups)) * 0.5 + quantitative
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in packet:
+        targets = item.get("coverage_targets", [])
+        group = str(targets[0]) if isinstance(targets, list) and targets else "__unassigned__"
+        item["writer_priority"] = round(score(item), 3)
+        groups.setdefault(group, []).append(item)
+    for values in groups.values():
+        values.sort(key=lambda item: (-float(item.get("writer_priority", 0.0)), str(item.get("claim_id", ""))))
+
+    target_order = list(state.coverage)
+    for target in groups:
+        if target not in target_order:
+            target_order.append(target)
+    output: list[dict[str, Any]] = []
+    while any(groups.values()):
+        for target in target_order:
+            values = groups.get(target, [])
+            if values:
+                output.append(values.pop(0))
+    return output
 
 
 def fallback_report(state: GlobalResearchState, packet: list[dict[str, Any]]) -> str:
@@ -944,8 +1096,8 @@ def fallback_report(state: GlobalResearchState, packet: list[dict[str, Any]]) ->
 
 
 def fallback_audit(state: GlobalResearchState) -> AuditResult:
-    exact_urls = {source.url for source in state.sources.values() if source.url}
-    cited_urls = {url.rstrip(".,;:") for url in URL_RE.findall(state.article)}
+    exact_urls = {canonicalize_url(source.url) for source in state.sources.values() if source.url}
+    cited_urls = {canonicalize_url(url) for url in extract_urls(state.article)}
     passed = bool(state.article.strip() and state.claims and exact_urls.intersection(cited_urls))
     issues = [] if passed else [
         {

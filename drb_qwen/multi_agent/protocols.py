@@ -97,6 +97,7 @@ RESEARCHER_DECISION_SCHEMA: dict[str, Any] = {
             },
         },
         "add_gaps": STRING_ARRAY,
+        "resolved_gaps": STRING_ARRAY,
         "add_conflicts": {"type": "array", "items": {"type": "object"}},
         "suggested_followups": STRING_ARRAY,
         "answer_summary": {"type": "string"},

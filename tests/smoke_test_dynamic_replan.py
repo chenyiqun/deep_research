@@ -4,6 +4,13 @@ import asyncio
 import json
 
 from drb_qwen.deep_research_workflow import AsyncDeepResearchWorkflow, DeepResearchConfig
+from drb_qwen.multi_agent.schemas import (
+    AuditResult,
+    GlobalResearchState,
+    RunPhase,
+    SubTask,
+    TaskStatus,
+)
 from drb_qwen.web_search import SearchResult
 
 
@@ -64,7 +71,9 @@ class DynamicFakeLLM:
                     "assessment": {"coverage": "sufficient", "primary_gap": ""},
                     "actions": [],
                     "answer_summary": "Evidence collected.",
-                    "finish": True,
+                    # The runtime should treat an explicit sufficient
+                    # assessment as terminal even if the model omits finish.
+                    "finish": False,
                 }
             )
         if "<protocol>READER_EXTRACT_V1</protocol>" in user_prompt:
@@ -188,6 +197,31 @@ async def main_async() -> None:
             citation_audit_enabled=True,
         ),
     )
+    deferred_state = GlobalResearchState(
+        run_id="deferred",
+        task={"prompt": "deferred"},
+        phase=RunPhase.RESEARCHING,
+        tasks={
+            "done": SubTask(id="done", objective="done", status=TaskStatus.COMPLETED),
+            "dependent": SubTask(
+                id="dependent",
+                objective="existing dependent work",
+                depends_on=["done"],
+            ),
+        },
+    )
+    deferred_trace: list[dict] = []
+    await workflow._strategic_boundary(deferred_state, deferred_trace)
+    assert llm.replan_calls == 0
+    assert deferred_state.phase == RunPhase.RESEARCHING
+    assert deferred_trace[-1]["type"] == "main_replan_deferred"
+    assert workflow._research_limits(deferred_state) == (16, 24)
+    assert workflow._token_limit(deferred_state) == 850_000
+    deferred_state.audit_round = 1
+    deferred_state.audit = AuditResult(passed=False)
+    assert workflow._research_limits(deferred_state) == (20, 30)
+    assert workflow._token_limit(deferred_state) == 1_000_000
+
     result = await workflow.run({"id": 200, "language": "en", "prompt": "dynamic research"})
     assert result["state"]["phase"] == "completed"
     assert set(result["state"]["tasks"]) == {"base", "followup", "repair_1_1"}

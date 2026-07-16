@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from difflib import SequenceMatcher
 import hashlib
 import json
 import re
@@ -57,6 +58,38 @@ def utc_now() -> str:
 
 def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+SEMANTIC_FILLER_RE = re.compile(
+    r"(?:尚未|仍未|未能|未提供|未提及|缺少|缺乏|需要补充|无法获得|"
+    r"collect|complete|provide|obtain|find|research|analyze|analysis|detailed|specific)",
+    re.IGNORECASE,
+)
+NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
+
+
+def semantic_text_key(value: Any) -> str:
+    """Normalize boilerplate while retaining entities, metrics, and numbers."""
+
+    text = SEMANTIC_FILLER_RE.sub(" ", normalize_text(value))
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff%]+", "", text)
+
+
+def texts_semantically_equivalent(left: Any, right: Any, threshold: float = 0.88) -> bool:
+    """Conservative near-duplicate check for task objectives and active gaps."""
+
+    first = semantic_text_key(left)
+    second = semantic_text_key(right)
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    if set(NUMBER_RE.findall(first)) != set(NUMBER_RE.findall(second)):
+        return False
+    shorter, longer = sorted((first, second), key=len)
+    if len(shorter) >= 12 and shorter in longer:
+        return True
+    return SequenceMatcher(None, first, second).ratio() >= threshold
 
 
 def stable_id(prefix: str, *parts: Any, length: int = 16) -> str:
@@ -193,6 +226,8 @@ class SourceRecord:
     publish_date: str = ""
     media: str = ""
     source_quality: str = "snippet_only"
+    source_type: str = "unknown"
+    authority_score: float = 0.5
     extraction_method: str = "snippet"
     independence_group: str = ""
     artifact_id: str = ""
@@ -212,6 +247,8 @@ class SourceRecord:
             publish_date=str(value.get("publish_date", "")),
             media=str(value.get("media", "")),
             source_quality=str(value.get("source_quality", "snippet_only")),
+            source_type=str(value.get("source_type", "unknown")),
+            authority_score=max(0.0, min(1.0, safe_float(value.get("authority_score"), 0.5))),
             extraction_method=str(value.get("extraction_method", "snippet")),
             independence_group=str(value.get("independence_group", "")),
             artifact_id=str(value.get("artifact_id", "")),
@@ -321,6 +358,7 @@ class LocalResearchState:
     evidence_ids: list[str] = field(default_factory=list)
     claim_ids: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
+    resolved_gaps: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     recent_observations: list[dict[str, Any]] = field(default_factory=list)
     tool_calls: int = 0
@@ -347,6 +385,7 @@ class LocalResearchState:
             evidence_ids=string_list(value.get("evidence_ids")),
             claim_ids=string_list(value.get("claim_ids")),
             gaps=string_list(value.get("gaps")),
+            resolved_gaps=string_list(value.get("resolved_gaps")),
             conflicts=[item for item in value.get("conflicts", []) if isinstance(item, dict)],
             recent_observations=[item for item in value.get("recent_observations", []) if isinstance(item, dict)],
             tool_calls=max(0, safe_int(value.get("tool_calls"), 0)),
@@ -367,6 +406,7 @@ class AgentResult:
     evidence_ids: list[str] = field(default_factory=list)
     source_ids: list[str] = field(default_factory=list)
     unresolved_gaps: list[str] = field(default_factory=list)
+    resolved_gaps: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     suggested_followups: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
@@ -385,6 +425,7 @@ class AgentResult:
             evidence_ids=string_list(value.get("evidence_ids")),
             source_ids=string_list(value.get("source_ids")),
             unresolved_gaps=string_list(value.get("unresolved_gaps")),
+            resolved_gaps=string_list(value.get("resolved_gaps")),
             conflicts=[item for item in value.get("conflicts", []) if isinstance(item, dict)],
             suggested_followups=string_list(value.get("suggested_followups")),
             usage={str(k): max(0, safe_int(v, 0)) for k, v in value.get("usage", {}).items()},
@@ -424,7 +465,9 @@ class GlobalResearchState:
     evidence: dict[str, EvidenceRecord] = field(default_factory=dict)
     claims: dict[str, ClaimRecord] = field(default_factory=dict)
     agent_results: dict[str, AgentResult] = field(default_factory=dict)
+    query_ledger: list[str] = field(default_factory=list)
     coverage: dict[str, str] = field(default_factory=dict)
+    coverage_details: dict[str, dict[str, Any]] = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
     budget: BudgetUsage = field(default_factory=BudgetUsage)
@@ -464,7 +507,13 @@ class GlobalResearchState:
             evidence={str(k): EvidenceRecord.from_dict(v) for k, v in value.get("evidence", {}).items() if isinstance(v, dict)},
             claims={str(k): ClaimRecord.from_dict(v) for k, v in value.get("claims", {}).items() if isinstance(v, dict)},
             agent_results={str(k): AgentResult.from_dict(v) for k, v in value.get("agent_results", {}).items() if isinstance(v, dict)},
+            query_ledger=string_list(value.get("query_ledger"), 256),
             coverage={str(k): str(v) for k, v in value.get("coverage", {}).items()},
+            coverage_details={
+                str(k): dict(v)
+                for k, v in value.get("coverage_details", {}).items()
+                if isinstance(v, dict)
+            },
             gaps=string_list(value.get("gaps")),
             conflicts=[item for item in value.get("conflicts", []) if isinstance(item, dict)],
             budget=BudgetUsage.from_dict(value.get("budget", {})),
@@ -495,8 +544,10 @@ class GlobalResearchState:
             "state_version": self.state_version,
             "brief": self.brief.to_dict() if self.brief else None,
             "tasks": tasks,
+            "query_ledger": self.query_ledger[-128:],
             "claims": claims,
             "coverage": self.coverage,
+            "coverage_details": self.coverage_details,
             "gaps": self.gaps,
             "conflicts": self.conflicts,
             "budget": self.budget.to_dict(),
@@ -519,6 +570,13 @@ class ResearchExecutionBundle:
 def safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return default
 

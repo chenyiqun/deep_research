@@ -350,6 +350,9 @@ async def run_async(args: argparse.Namespace) -> None:
         auditor_max_tokens=args.auditor_max_tokens,
         max_audit_rounds=args.max_audit_rounds,
         max_repair_tasks=args.max_repair_tasks,
+        audit_repair_search_reserve=args.audit_repair_search_reserve,
+        audit_repair_tool_reserve=args.audit_repair_tool_reserve,
+        audit_repair_token_reserve=args.audit_repair_token_reserve,
         run_state_dir=run_state_dir,
         resume_runs=args.resume_runs or args.resume,
         max_model_len=args.max_model_len,
@@ -539,6 +542,9 @@ def main() -> None:
     parser.add_argument("--auditor-max-tokens", type=int, default=3072)
     parser.add_argument("--max-audit-rounds", type=int, default=2)
     parser.add_argument("--max-repair-tasks", type=int, default=3)
+    parser.add_argument("--audit-repair-search-reserve", type=int, default=6)
+    parser.add_argument("--audit-repair-tool-reserve", type=int, default=30)
+    parser.add_argument("--audit-repair-token-reserve", type=int, default=150_000)
     parser.add_argument("--max-model-len", type=int, default=32768)
     parser.add_argument("--context-safety-tokens", type=int, default=512)
     parser.add_argument("--tokenizer-path", default="")

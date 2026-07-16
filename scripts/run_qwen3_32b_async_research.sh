@@ -52,6 +52,9 @@ MIN_TOTAL_CLAIMS="${MIN_TOTAL_CLAIMS:-3}"
 MIN_COVERAGE_RATIO="${MIN_COVERAGE_RATIO:-0.6}"
 MAX_AUDIT_ROUNDS="${MAX_AUDIT_ROUNDS:-2}"
 MAX_REPAIR_TASKS="${MAX_REPAIR_TASKS:-3}"
+AUDIT_REPAIR_SEARCH_RESERVE="${AUDIT_REPAIR_SEARCH_RESERVE:-6}"
+AUDIT_REPAIR_TOOL_RESERVE="${AUDIT_REPAIR_TOOL_RESERVE:-30}"
+AUDIT_REPAIR_TOKEN_RESERVE="${AUDIT_REPAIR_TOKEN_RESERVE:-150000}"
 AUDITOR_MAX_TOKENS="${AUDITOR_MAX_TOKENS:-4096}"
 RUN_STATE_DIR="${RUN_STATE_DIR:-${OUT_DIR}/run_state}"
 SEARCH_TOP_K="${SEARCH_TOP_K:-5}"
@@ -137,6 +140,9 @@ echo "Max researchers per run: ${MAX_RESEARCHERS}"
 echo "Max subtasks per run: ${MAX_SUBTASKS}"
 echo "Max ReAct steps per subtask: ${MAX_REACT_STEPS}"
 echo "Max total tool calls per run: ${MAX_TOTAL_TOOL_CALLS}"
+echo "Audit repair reserved searches: ${AUDIT_REPAIR_SEARCH_RESERVE}"
+echo "Audit repair reserved tool calls: ${AUDIT_REPAIR_TOOL_RESERVE}"
+echo "Audit repair reserved tokens: ${AUDIT_REPAIR_TOKEN_RESERVE}"
 echo "Max total tokens per run: ${MAX_TOTAL_TOKENS}"
 echo "Run state dir: ${RUN_STATE_DIR}"
 echo "Search queries per round: ${MAX_SEARCH_QUERIES_PER_ROUND}"
@@ -242,6 +248,9 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --min-coverage-ratio "${MIN_COVERAGE_RATIO}" \
   --max-audit-rounds "${MAX_AUDIT_ROUNDS}" \
   --max-repair-tasks "${MAX_REPAIR_TASKS}" \
+  --audit-repair-search-reserve "${AUDIT_REPAIR_SEARCH_RESERVE}" \
+  --audit-repair-tool-reserve "${AUDIT_REPAIR_TOOL_RESERVE}" \
+  --audit-repair-token-reserve "${AUDIT_REPAIR_TOKEN_RESERVE}" \
   --auditor-max-tokens "${AUDITOR_MAX_TOKENS}" \
   --source-content-max-chars "${SOURCE_CONTENT_MAX_CHARS}" \
   --state-prompt-max-chars "${STATE_PROMPT_MAX_CHARS}" \

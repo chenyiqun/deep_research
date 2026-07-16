@@ -9,6 +9,7 @@ from .schemas import (
     ResearchExecutionBundle,
     TaskStatus,
     normalize_text,
+    texts_semantically_equivalent,
     utc_now,
 )
 from .security import validate_external_url
@@ -95,13 +96,27 @@ def merge_research_bundle(state: GlobalResearchState, bundle: ResearchExecutionB
             ["Subtask produced no valid source-grounded claims after integrity checks."],
         )
 
+    missing_source_types = source_requirement_gaps(state, task, result.source_ids)
+    if missing_source_types:
+        append_semantically_unique_strings(result.unresolved_gaps, missing_source_types, max_items=40)
+        if result.status == TaskStatus.COMPLETED:
+            result.status = TaskStatus.PARTIAL
+
     task.status = result.status
     task.result_summary = result.answer_summary
     task.error = result.error
     task.attempts += 1
     task.updated_at = utc_now()
     state.agent_results[result.subtask_id] = result
-    append_unique_strings(state.gaps, result.unresolved_gaps)
+    append_unique_strings(state.query_ledger, bundle.local_state.queries)
+    state.query_ledger = state.query_ledger[-256:]
+    if result.resolved_gaps:
+        state.gaps = [
+            gap
+            for gap in state.gaps
+            if not any(texts_semantically_equivalent(gap, resolved) for resolved in result.resolved_gaps)
+        ]
+    append_semantically_unique_strings(state.gaps, result.unresolved_gaps, max_items=100)
     append_unique_dicts(state.conflicts, result.conflicts)
     state.budget.add(result.usage)
     if result.status == TaskStatus.COMPLETED:
@@ -176,6 +191,54 @@ def update_coverage(state: GlobalResearchState, subtask_id: str) -> None:
             state.coverage[target] = "partial"
         elif current not in {"covered", "partial"}:
             state.coverage[target] = "missing"
+        detail = state.coverage_details.setdefault(
+            target,
+            {
+                "status": "missing",
+                "task_ids": [],
+                "completed_task_ids": [],
+                "claim_ids": [],
+                "source_types": [],
+                "high_authority_source_ids": [],
+                "missing_source_requirements": [],
+            },
+        )
+        # Resumed runs may contain an older/partial coverage_details shape.
+        # Populate every collection before merging new bundle data.
+        for key in (
+            "task_ids",
+            "completed_task_ids",
+            "claim_ids",
+            "source_types",
+            "high_authority_source_ids",
+            "missing_source_requirements",
+        ):
+            if not isinstance(detail.get(key), list):
+                detail[key] = []
+        append_unique_strings(detail["task_ids"], [task.id])
+        if task.status == TaskStatus.COMPLETED:
+            append_unique_strings(detail["completed_task_ids"], [task.id])
+        if result:
+            append_unique_strings(detail["claim_ids"], result.claim_ids)
+            source_types: list[str] = []
+            high_authority_ids: list[str] = []
+            for source_id in result.source_ids:
+                source = state.sources.get(source_id)
+                if not source:
+                    continue
+                source_types.append(source.source_type)
+                if source.authority_score >= 0.8:
+                    high_authority_ids.append(source.id)
+            append_unique_strings(detail["source_types"], source_types)
+            append_unique_strings(detail["high_authority_source_ids"], high_authority_ids)
+            detail["missing_source_requirements"] = source_requirement_gaps(
+                state,
+                task,
+                result.source_ids,
+                descriptions=False,
+            )
+        detail["status"] = state.coverage[target]
+        detail["claim_count"] = len(detail["claim_ids"])
 
 
 def initialize_coverage(state: GlobalResearchState) -> None:
@@ -186,6 +249,24 @@ def initialize_coverage(state: GlobalResearchState) -> None:
         targets.extend(task.coverage_targets)
     for target in targets:
         state.coverage.setdefault(target, "missing")
+        state.coverage_details.setdefault(
+            target,
+            {
+                "status": state.coverage[target],
+                "task_ids": [],
+                "completed_task_ids": [],
+                "claim_ids": [],
+                "source_types": [],
+                "high_authority_source_ids": [],
+                "missing_source_requirements": [],
+                "claim_count": 0,
+            },
+        )
+    for task in state.tasks.values():
+        for target in task.coverage_targets:
+            detail = state.coverage_details.setdefault(target, {"status": state.coverage.get(target, "missing")})
+            detail.setdefault("task_ids", [])
+            append_unique_strings(detail["task_ids"], [task.id])
 
 
 def evaluate_research_gate(
@@ -216,6 +297,52 @@ def append_unique_strings(target: list[str], values: list[str]) -> None:
         if key and key not in seen:
             target.append(value)
             seen.add(key)
+
+
+def append_semantically_unique_strings(
+    target: list[str],
+    values: list[str],
+    *,
+    max_items: int,
+) -> None:
+    for value in values:
+        text = str(value or "").strip()
+        if not text or any(texts_semantically_equivalent(text, existing) for existing in target):
+            continue
+        target.append(text)
+        if len(target) >= max(1, int(max_items)):
+            break
+
+
+def source_requirement_gaps(
+    state: GlobalResearchState,
+    task: Any,
+    source_ids: list[str],
+    *,
+    descriptions: bool = True,
+) -> list[str]:
+    if not task.required_source_types:
+        return []
+    sources = [state.sources[source_id] for source_id in source_ids if source_id in state.sources]
+    source_types = {source.source_type for source in sources}
+    independence_groups = {source.independence_group for source in sources if source.independence_group}
+    missing: list[str] = []
+    for requirement in task.required_source_types:
+        normalized = normalize_text(requirement)
+        satisfied = False
+        if normalized == "primary":
+            satisfied = bool(source_types & {"official", "primary", "institutional"})
+        elif normalized == "independent":
+            satisfied = "independent_media" in source_types or len(independence_groups) >= 2
+        else:
+            satisfied = normalized in source_types
+        if not satisfied:
+            missing.append(
+                f"Missing required source type for {task.objective}: {requirement}"
+                if descriptions
+                else requirement
+            )
+    return missing
 
 
 def append_unique_dicts(target: list[dict[str, Any]], values: list[dict[str, Any]]) -> None:

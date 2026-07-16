@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
-import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,25 +19,21 @@ from .io_utils import (
 from .json_utils import ensure_list, extract_json
 from .prompts import build_fact_extract_prompt, build_fact_validate_prompt
 from .scoring import summarize_fact
+from .url_utils import URL_RE, clean_url
 from .vllm_chat import GenerationConfig, VLLMChatModel
 
 
 DEFAULT_QWEN3_8B_PATH = "/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-8B"
 
 
-URL_RE = re.compile(r"https?://[^\s\])}>\"']+")
-
-
-def clean_url(url: str) -> str:
-    return url.strip().rstrip(".,;:)]}")
-
-
 def fallback_extract_urls(article: str) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
+    # Keep every occurrence because the same source may support several
+    # separately scored statements; only the URL grammar is centralized.
     for match in URL_RE.finditer(article):
         url = clean_url(match.group(0))
         left = max(0, match.start() - 350)
-        right = min(len(article), match.end() + 120)
+        right = min(len(article), match.start() + len(url) + 120)
         statement = article[left:right].replace("\n", " ").strip()
         items.append({"statement": statement, "url": url})
     return items

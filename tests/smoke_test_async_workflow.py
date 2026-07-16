@@ -244,6 +244,10 @@ async def main_async() -> None:
         assert len(result["state"]["claims"]) == 2
         assert len(result["state"]["evidence"]) == 2
         assert result["audit"]["passed"] is True
+        assert result["diagnostics"]["query_calls"] == 2
+        assert result["diagnostics"]["unique_queries"] == 2
+        assert result["diagnostics"]["task_statuses"] == {"completed": 2}
+        assert set(result["state"]["coverage_details"]) == {"mechanisms", "evidence"}
         assert result["state"]["budget"]["total_tokens"] == len(llm.calls) * 10
         assert result["inference"]["requests"] == len(llm.calls)
         summary = summarize_research_result(result)

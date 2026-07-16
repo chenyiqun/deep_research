@@ -92,6 +92,9 @@ async def run_async(args: argparse.Namespace) -> dict[str, Any]:
         citation_audit_enabled=not args.disable_citation_audit,
         max_audit_rounds=args.max_audit_rounds,
         max_repair_tasks=args.max_repair_tasks,
+        audit_repair_search_reserve=args.audit_repair_search_reserve,
+        audit_repair_tool_reserve=args.audit_repair_tool_reserve,
+        audit_repair_token_reserve=args.audit_repair_token_reserve,
         planner_max_tokens=args.planner_max_tokens,
         reader_max_tokens=args.reader_max_tokens,
         summarizer_max_tokens=args.researcher_max_tokens,
@@ -228,6 +231,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-citation-audit", action="store_true")
     parser.add_argument("--max-audit-rounds", type=int, default=2)
     parser.add_argument("--max-repair-tasks", type=int, default=3)
+    parser.add_argument("--audit-repair-search-reserve", type=int, default=6)
+    parser.add_argument("--audit-repair-tool-reserve", type=int, default=30)
+    parser.add_argument("--audit-repair-token-reserve", type=int, default=150_000)
 
     parser.add_argument("--planner-max-tokens", type=int, default=3072)
     parser.add_argument("--researcher-max-tokens", type=int, default=1200)
