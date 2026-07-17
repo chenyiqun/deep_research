@@ -33,6 +33,7 @@ class ToolBatchResult:
     observations: list[dict[str, Any]] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    rejection_counts: dict[str, int] = field(default_factory=dict)
 
 
 class ResearchTools:
@@ -189,7 +190,9 @@ class ResearchTools:
                 claim_items = []
             source_claim_ids: list[str] = []
             source_evidence_ids: list[str] = []
-            rejected_claims = 0
+            rejected_grounding = 0
+            rejected_scope = 0
+            rejected_number = 0
             if isinstance(claim_items, list):
                 for claim_item in claim_items:
                     if not isinstance(claim_item, dict):
@@ -198,11 +201,15 @@ class ResearchTools:
                     excerpt = str(claim_item.get("excerpt", claim_item.get("evidence", ""))).strip()
                     if not claim_text or not excerpt:
                         continue
-                    if not excerpt_is_grounded(excerpt, source_text) or not claim_preserves_scope(
-                        claim_text,
-                        excerpt,
-                    ):
-                        rejected_claims += 1
+                    if not excerpt_is_grounded(excerpt, source_text):
+                        rejected_grounding += 1
+                        continue
+                    rejection_reason = claim_scope_rejection_reason(claim_text, excerpt)
+                    if rejection_reason:
+                        if rejection_reason == "number":
+                            rejected_number += 1
+                        else:
+                            rejected_scope += 1
                         continue
                     confidence = normalize_confidence(
                         claim_item.get("confidence"),
@@ -236,10 +243,23 @@ class ResearchTools:
                             confidence=confidence,
                             status="qualified" if relation == "qualifies" else "provisional",
                             qualifiers=string_list(claim_item.get("qualifiers"), 10),
+                            dimensions=normalize_claim_dimensions(claim_item.get("dimensions")),
+                            required_source_types=normalize_source_requirements(
+                                claim_item.get("required_source_types")
+                            ),
                         )
                         claims_by_id[claim_id] = claim
                     elif evidence_id not in claim.evidence_ids:
                         claim.evidence_ids.append(evidence_id)
+                    for requirement in normalize_source_requirements(
+                        claim_item.get("required_source_types")
+                    ):
+                        if requirement not in claim.required_source_types:
+                            claim.required_source_types.append(requirement)
+                    for key, value in normalize_claim_dimensions(
+                        claim_item.get("dimensions")
+                    ).items():
+                        claim.dimensions.setdefault(key, value)
                     source_claim_ids.append(claim_id)
                     source_evidence_ids.append(evidence_id)
             output.observations.append(
@@ -254,7 +274,9 @@ class ResearchTools:
                     "relevance": relevance,
                     "claim_ids": source_claim_ids,
                     "evidence_ids": source_evidence_ids,
-                    "rejected_ungrounded_claims": rejected_claims,
+                    "rejected_grounding_claims": rejected_grounding,
+                    "rejected_scope_claims": rejected_scope,
+                    "rejected_number_claims": rejected_number,
                     "claim_summaries": [claims_by_id[item].text for item in source_claim_ids if item in claims_by_id],
                     "gaps": string_list(parsed.get("gaps"), 10),
                     "conflicts": [item for item in parsed.get("conflicts", []) if isinstance(item, dict)],
@@ -263,10 +285,27 @@ class ResearchTools:
                     "fetch": fetch_trace,
                 }
             )
-            if rejected_claims:
+            if rejected_grounding:
                 output.errors.append(
-                    f"reader returned {rejected_claims} excerpt(s) that failed grounding/scope checks: {source.url}"
+                    f"reader returned {rejected_grounding} excerpt(s) that failed grounding checks: {source.url}"
                 )
+            if rejected_scope:
+                output.errors.append(
+                    f"reader returned {rejected_scope} claim(s) that broadened source scope: {source.url}"
+                )
+            if rejected_number:
+                output.errors.append(
+                    f"reader returned {rejected_number} claim(s) with ungrounded numeric values: {source.url}"
+                )
+            output.rejection_counts["grounding"] = (
+                output.rejection_counts.get("grounding", 0) + rejected_grounding
+            )
+            output.rejection_counts["scope"] = (
+                output.rejection_counts.get("scope", 0) + rejected_scope
+            )
+            output.rejection_counts["number"] = (
+                output.rejection_counts.get("number", 0) + rejected_number
+            )
 
         output.claims = list(claims_by_id.values())
         output.evidence = list(evidence_by_id.values())
@@ -473,17 +512,23 @@ SCOPE_GROUPS = (
 def claim_preserves_scope(claim: str, excerpt: str) -> bool:
     """Reject direct evidence claims that add numbers or a new statistical scope."""
 
+    return not claim_scope_rejection_reason(claim, excerpt)
+
+
+def claim_scope_rejection_reason(claim: str, excerpt: str) -> str:
+    """Return a stable rejection class for Reader observability."""
+
     claim_text = normalize_text(claim)
     excerpt_text = normalize_text(excerpt)
     excerpt_numbers = set(CLAIM_NUMBER_RE.findall(excerpt_text))
     if any(number not in excerpt_numbers for number in CLAIM_NUMBER_RE.findall(claim_text)):
-        return False
+        return "number"
     for group in SCOPE_GROUPS:
         claim_has_scope = any(marker in claim_text for marker in group)
         excerpt_has_scope = any(marker in excerpt_text for marker in group)
         if claim_has_scope and not excerpt_has_scope:
-            return False
-    return True
+            return "scope"
+    return ""
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -491,6 +536,34 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def normalize_source_requirements(value: Any) -> list[str]:
+    allowed = {"primary", "independent", "corroborated"}
+    return [
+        item
+        for item in string_list(value, 3)
+        if normalize_text(item) in allowed
+    ]
+
+
+def normalize_claim_dimensions(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "entity",
+        "metric",
+        "period",
+        "geography",
+        "unit",
+        "denominator",
+        "accounting_scope",
+    }
+    return {
+        str(key): str(item).strip()[:300]
+        for key, item in value.items()
+        if str(key) in allowed and str(item).strip()
+    }
 
 
 def build_visit_goal(original_task: dict[str, Any], subtask: SubTask, result: SearchResult) -> str:

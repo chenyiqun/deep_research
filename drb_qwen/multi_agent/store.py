@@ -8,6 +8,7 @@ from typing import Any
 
 from .schemas import (
     AgentResult,
+    CalculationRecord,
     ClaimRecord,
     EvidenceRecord,
     GlobalResearchState,
@@ -111,6 +112,7 @@ class RunStore:
                 "sources": [item.to_dict() for item in bundle.sources],
                 "evidence": [item.to_dict() for item in bundle.evidence],
                 "claims": [item.to_dict() for item in bundle.claims],
+                "calculations": [item.to_dict() for item in bundle.calculations],
                 "events": bundle.events,
             },
         )
@@ -136,6 +138,11 @@ class RunStore:
                 sources=[SourceRecord.from_dict(item) for item in value.get("sources", []) if isinstance(item, dict)],
                 evidence=[EvidenceRecord.from_dict(item) for item in value.get("evidence", []) if isinstance(item, dict)],
                 claims=[ClaimRecord.from_dict(item) for item in value.get("claims", []) if isinstance(item, dict)],
+                calculations=[
+                    CalculationRecord.from_dict(item)
+                    for item in value.get("calculations", [])
+                    if isinstance(item, dict)
+                ],
                 events=[item for item in value.get("events", []) if isinstance(item, dict)],
             )
         except Exception as exc:
@@ -149,6 +156,7 @@ class RunStore:
         sources: list[SourceRecord],
         evidence: list[EvidenceRecord],
         claims: list[ClaimRecord],
+        calculations: list[CalculationRecord] | None = None,
         events: list[dict[str, Any]],
         usage: dict[str, int],
         last_decision: dict[str, Any],
@@ -166,6 +174,7 @@ class RunStore:
                 "sources": [item.to_dict() for item in sources],
                 "evidence": [item.to_dict() for item in evidence],
                 "claims": [item.to_dict() for item in claims],
+                "calculations": [item.to_dict() for item in (calculations or [])],
                 "events": events,
                 "usage": usage,
                 "last_decision": last_decision,
@@ -195,6 +204,11 @@ class RunStore:
                 "claims": [
                     ClaimRecord.from_dict(item) for item in value.get("claims", []) if isinstance(item, dict)
                 ],
+                "calculations": [
+                    CalculationRecord.from_dict(item)
+                    for item in value.get("calculations", [])
+                    if isinstance(item, dict)
+                ],
                 "events": [item for item in value.get("events", []) if isinstance(item, dict)],
                 "usage": {
                     str(key): max(0, int(number))
@@ -217,6 +231,22 @@ class RunStore:
         path = run_dir / "checkpoints" / f"{safe_name(subtask_id)}.json"
         if path.exists():
             path.unlink()
+
+    def clear_task_execution(self, run_id: str, subtask_id: str) -> None:
+        """Remove terminal/local execution files before an explicit REFINE_TASK rerun."""
+
+        run_dir = self.run_dir(run_id)
+        if run_dir is None:
+            return
+        safe_id = safe_name(subtask_id)
+        paths = (
+            run_dir / "local" / f"{safe_id}.json",
+            run_dir / "checkpoints" / f"{safe_id}.json",
+            run_dir / "bundles" / f"{safe_id}.json",
+        )
+        for path in paths:
+            if path.exists():
+                path.unlink()
 
     def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = {

@@ -175,6 +175,25 @@ class DynamicSearchClient:
         ]
 
 
+class RewriteOnlyAuditor:
+    async def audit(self, state: GlobalResearchState, evidence_packet: list[dict]) -> tuple[AuditResult, str, dict]:
+        return (
+            AuditResult(
+                passed=False,
+                issues=[{"severity": "major", "claim": "draft", "reason": "citation formatting"}],
+                repair_tasks=[
+                    {
+                        "objective": "repair citation formatting",
+                        "repair_kind": "rewrite",
+                        "requires_search": False,
+                    }
+                ],
+            ),
+            "{}",
+            {},
+        )
+
+
 async def main_async() -> None:
     llm = DynamicFakeLLM()
     workflow = AsyncDeepResearchWorkflow(
@@ -221,6 +240,20 @@ async def main_async() -> None:
     deferred_state.audit = AuditResult(passed=False)
     assert workflow._research_limits(deferred_state) == (20, 30)
     assert workflow._token_limit(deferred_state) == 1_000_000
+
+    rewrite_state = GlobalResearchState(
+        run_id="rewrite-final",
+        task={"prompt": "rewrite"},
+        phase=RunPhase.AUDITING,
+        audit_round=1,
+        article="draft",
+    )
+    original_auditor = workflow.auditor
+    workflow.auditor = RewriteOnlyAuditor()  # type: ignore[assignment]
+    await workflow._audit_phase(rewrite_state, [])
+    workflow.auditor = original_auditor
+    assert rewrite_state.audit_round == 2
+    assert rewrite_state.phase == RunPhase.WRITING
 
     result = await workflow.run({"id": 200, "language": "en", "prompt": "dynamic research"})
     assert result["state"]["phase"] == "completed"

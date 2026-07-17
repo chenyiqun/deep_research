@@ -7,6 +7,7 @@ from typing import Any, Callable
 from ..json_utils import extract_json
 from ..url_utils import canonicalize_url, extract_urls
 from .context import ContextWindowExceeded, ResearcherContextBuilder, TokenCounter
+from .calculator import execute_calculation_proposals
 from .inference import is_context_length_error
 from .llm import add_token_usage, call_chat
 from .prompts import (
@@ -22,6 +23,7 @@ from .prompts import (
 from .schemas import (
     AgentResult,
     AuditResult,
+    CalculationRecord,
     ClaimRecord,
     EvidenceRecord,
     GlobalResearchState,
@@ -48,6 +50,7 @@ from .tools import ResearchTools
 
 
 REACT_STEP_TERMINAL = "__react_step_terminal__"
+EVIDENCE_CITATION_RE = re.compile(r"\[\[EVIDENCE:([A-Za-z0-9_.-]+)\]\]")
 
 
 @dataclass
@@ -221,6 +224,38 @@ class ResearcherAgent:
         claims: dict[str, ClaimRecord] = {
             item.id: item for item in (checkpoint.get("claims", []) if checkpoint else [])
         }
+        calculations: dict[str, CalculationRecord] = {
+            item.id: item for item in (checkpoint.get("calculations", []) if checkpoint else [])
+        }
+        if checkpoint is None and subtask.attempts > 0:
+            claims = {
+                item.id: item
+                for item in state.claims.values()
+                if item.subtask_id == subtask.id
+            }
+            evidence = {
+                evidence_id: state.evidence[evidence_id]
+                for claim in claims.values()
+                for evidence_id in claim.evidence_ids
+                if evidence_id in state.evidence
+            }
+            sources = {
+                state.evidence[evidence_id].source_id: state.sources[
+                    state.evidence[evidence_id].source_id
+                ]
+                for evidence_id in evidence
+                if state.evidence[evidence_id].source_id in state.sources
+            }
+            calculations = {
+                item.id: item
+                for item in state.calculations.values()
+                if item.subtask_id == subtask.id
+            }
+            local.claim_ids = list(claims)
+            local.evidence_ids = list(evidence)
+            local.source_ids = list(sources)
+            local.calculation_ids = list(calculations)
+            self.store.save_local(local)
         events: list[dict[str, Any]] = list(checkpoint.get("events", [])) if checkpoint else []
         usage = {
             "researcher_calls": 0,
@@ -236,10 +271,13 @@ class ResearcherAgent:
             for key, value in checkpoint.get("usage", {}).items():
                 if key in usage:
                     usage[key] = int(value)
-        max_search_calls = (
+        task_search_limit = subtask.max_search_calls or (
             subtask.max_steps * self.max_queries_per_step
+        )
+        max_search_calls = (
+            task_search_limit
             if search_call_budget is None
-            else max(0, int(search_call_budget))
+            else min(task_search_limit, max(0, int(search_call_budget)))
         )
         last_decision: dict[str, Any] = dict(checkpoint.get("last_decision", {})) if checkpoint else {}
         fatal_error = ""
@@ -250,6 +288,7 @@ class ResearcherAgent:
             sources=list(sources.values()),
             evidence=list(evidence.values()),
             claims=list(claims.values()),
+            calculations=list(calculations.values()),
             events=events,
             usage=usage,
             last_decision=last_decision,
@@ -258,14 +297,23 @@ class ResearcherAgent:
         try:
             while (
                 local.step < subtask.max_steps
-                and local.tool_calls < subtask.max_tool_calls
+                and (local.tool_calls < subtask.max_tool_calls or bool(claims))
                 and local.stop_reason != REACT_STEP_TERMINAL
                 and (usage["search_calls"] < max_search_calls or bool(claims))
             ):
+                remaining_steps = subtask.max_steps - local.step
                 allowed_queries = min(
                     self.max_queries_per_step,
                     max(0, max_search_calls - usage["search_calls"]),
                 )
+                # Preserve the final model turn for synthesis. Search results
+                # from a final-step tool call cannot be assessed until another
+                # stateless inference turn.
+                if (
+                    (remaining_steps <= 1 and bool(claims))
+                    or local.tool_calls >= subtask.max_tool_calls
+                ):
+                    allowed_queries = 0
                 global_context = build_global_context_slice(state, subtask)
                 context = self.context_builder.build(
                     original_task=state.task,
@@ -273,7 +321,7 @@ class ResearcherAgent:
                     subtask=subtask,
                     local=local,
                     global_context=global_context,
-                    remaining_steps=subtask.max_steps - local.step,
+                    remaining_steps=remaining_steps,
                     remaining_tool_calls=subtask.max_tool_calls - local.tool_calls,
                     max_queries=allowed_queries,
                 )
@@ -304,21 +352,42 @@ class ResearcherAgent:
                     decision = parsed_decision
                 local.step += 1
 
-                queries = extract_search_queries(decision, allowed_queries)
-                prior_queries = [*state.query_ledger, *local.queries]
-                queries = [
+                new_calculations, calculation_errors = execute_calculation_proposals(
+                    decision.get("calculations", []),
+                    evidence=evidence,
+                    subtask_id=subtask.id,
+                )
+                for calculation in new_calculations:
+                    calculations[calculation.id] = calculation
+                append_unique(local.calculation_ids, [item.id for item in new_calculations])
+
+                raw_queries = extract_search_queries(decision, self.max_queries_per_step)
+                prior_queries = list(local.queries)
+                novel_queries = [
                     query
-                    for query in queries
+                    for query in raw_queries
                     if not any(
                         texts_semantically_equivalent(query, prior, threshold=0.94)
                         for prior in prior_queries
                     )
                 ]
+                queries = novel_queries[:allowed_queries]
+                duplicate_queries = [
+                    query
+                    for query in raw_queries
+                    if any(
+                        texts_semantically_equivalent(query, prior, threshold=0.94)
+                        for prior in prior_queries
+                    )
+                ]
+                budget_filtered_queries = novel_queries[allowed_queries:]
                 max_affordable_queries = min(
                     max(0, subtask.max_tool_calls - local.tool_calls),
                     max(0, max_search_calls - usage["search_calls"]),
                 )
+                affordability_filtered_queries = queries[max_affordable_queries:]
                 queries = queries[:max_affordable_queries]
+                budget_filtered_queries.extend(affordability_filtered_queries)
                 finish_requested = bool(decision.get("finish", False))
                 assessment = decision.get("assessment", {})
                 assessment_coverage = (
@@ -326,8 +395,9 @@ class ResearcherAgent:
                     if isinstance(assessment, dict)
                     else "none"
                 )
+                final_synthesis_turn = local.step >= subtask.max_steps and not queries
                 finish_effective = (
-                    finish_requested or assessment_coverage == "sufficient"
+                    finish_requested or assessment_coverage == "sufficient" or final_synthesis_turn
                 ) and not queries
                 if queries and (finish_requested or assessment_coverage == "sufficient"):
                     decision = dict(decision)
@@ -346,7 +416,12 @@ class ResearcherAgent:
                     # signal even when the model omitted the redundant flag.
                     decision = dict(decision)
                     decision["finish"] = True
-                    decision.setdefault("stop_reason", "evidence sufficient")
+                    decision.setdefault(
+                        "stop_reason",
+                        "final synthesis turn reached"
+                        if final_synthesis_turn and assessment_coverage != "sufficient"
+                        else "evidence sufficient",
+                    )
                 add_local_semantic_patch(local, decision)
                 last_decision = decision
 
@@ -355,10 +430,18 @@ class ResearcherAgent:
                     "subtask_id": subtask.id,
                     "step": local.step,
                     "assessment": decision.get("assessment", {}),
+                    "raw_queries": raw_queries,
                     "queries": queries,
+                    "duplicate_filtered_queries": duplicate_queries,
+                    "budget_filtered_queries": budget_filtered_queries,
                     "finish_requested": finish_requested,
                     "finish_effective": finish_effective,
+                    "finish_forced": bool(final_synthesis_turn and not finish_requested),
                     "validation_error": decision.get("validation_error", ""),
+                    "task_tool_call_limit": subtask.max_tool_calls,
+                    "task_search_call_limit": max_search_calls,
+                    "calculation_ids": [item.id for item in new_calculations],
+                    "calculation_errors": calculation_errors,
                     "input_state_version": local.version,
                     "estimated_input_tokens": context.estimated_tokens,
                     "max_input_tokens": context.max_input_tokens,
@@ -386,6 +469,12 @@ class ResearcherAgent:
                             for evidence_id in claim.evidence_ids:
                                 if evidence_id not in existing.evidence_ids:
                                     existing.evidence_ids.append(evidence_id)
+                            append_unique(
+                                existing.required_source_types,
+                                claim.required_source_types,
+                            )
+                            for key, value in claim.dimensions.items():
+                                existing.dimensions.setdefault(key, value)
                     add_tool_result_to_local(local, queries, tool_result)
                     for key in usage:
                         usage[key] += int(tool_result.usage.get(key, 0))
@@ -395,10 +484,13 @@ class ResearcherAgent:
                             "num_evidence": len(tool_result.evidence),
                             "num_claims": len(tool_result.claims),
                             "errors": tool_result.errors,
+                            "rejection_counts": tool_result.rejection_counts,
                             "observations": tool_result.observations,
                         }
                     )
                 events.append(event)
+                event["local_tool_calls_after"] = local.tool_calls
+                event["local_search_calls_after"] = local.search_calls
                 local.version += 1
                 event["output_state_version"] = local.version
                 step_should_stop = (
@@ -414,6 +506,7 @@ class ResearcherAgent:
                     sources=list(sources.values()),
                     evidence=list(evidence.values()),
                     claims=list(claims.values()),
+                    calculations=list(calculations.values()),
                     events=events,
                     usage=usage,
                     last_decision=last_decision,
@@ -456,6 +549,7 @@ class ResearcherAgent:
         local.answer_summary = summary
         local.stop_reason = stop_reason
         local.claim_ids = list(claims)
+        local.calculation_ids = list(calculations)
         local.evidence_ids = list(evidence)
         local.source_ids = list(sources)
         local.version += 1
@@ -469,6 +563,7 @@ class ResearcherAgent:
             claim_ids=list(claims),
             evidence_ids=list(evidence),
             source_ids=list(sources),
+            calculation_ids=list(calculations),
             unresolved_gaps=local.gaps,
             resolved_gaps=local.resolved_gaps,
             conflicts=local.conflicts,
@@ -482,6 +577,7 @@ class ResearcherAgent:
             sources=list(sources.values()),
             evidence=list(evidence.values()),
             claims=list(claims.values()),
+            calculations=list(calculations.values()),
             events=events,
         )
         self.store.save_bundle(state.run_id, bundle)
@@ -609,9 +705,13 @@ class ReportWriter:
             response = ""
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         article = str(response or "").strip()
+        omitted_values = [int(value) for value in re.findall(r'"omitted_claims"\s*:\s*(\d+)', prompt)]
+        usage = dict(usage)
+        usage["dossier_omitted_claims"] = max(omitted_values, default=0)
         used_fallback = not bool(article)
         if not article:
             article = fallback_report(state, packet)
+        article = render_evidence_citations(article, state)
         return article, packet, usage, used_fallback
 
 
@@ -790,7 +890,7 @@ def fallback_initial_plan(task: dict[str, Any], raw_response: str, max_tasks: in
             "coverage_targets": [coverage[index - 1]],
             "depends_on": [],
             "priority": 80 - index,
-            "required_source_types": ["primary", "independent"],
+            "required_source_types": [],
         }
         for index, objective in enumerate(objectives, 1)
     ]
@@ -836,6 +936,7 @@ def fallback_researcher_decision(
             "base_local_version": local.version,
             "assessment": {"coverage": "partial", "primary_gap": "model output was not parseable"},
             "actions": [],
+            "calculations": [],
             "add_gaps": ["Researcher response was not parseable; result synthesized from tool evidence."],
             "answer_summary": summarize_claims(claims),
             "finish": True,
@@ -845,6 +946,7 @@ def fallback_researcher_decision(
         "base_local_version": local.version,
         "assessment": {"coverage": "none", "primary_gap": "initial evidence search"},
         "actions": [{"type": "SEARCH", "query": subtask.objective, "reason": "fallback query"}],
+        "calculations": [],
         "add_gaps": [],
         "answer_summary": "",
         "finish": False,
@@ -936,8 +1038,21 @@ def summarize_claims(claims: dict[str, ClaimRecord]) -> str:
 
 
 def build_global_context_slice(state: GlobalResearchState, subtask: SubTask) -> dict[str, Any]:
+    relevant_task_ids = {subtask.id, *subtask.depends_on}
+    target_terms = [normalize_text(value) for value in subtask.coverage_targets if normalize_text(value)]
+
+    def relevant_text(value: str) -> bool:
+        normalized = normalize_text(value)
+        if not normalized:
+            return False
+        if any(term in normalized or normalized in term for term in target_terms if len(term) >= 4):
+            return True
+        return texts_semantically_equivalent(value, subtask.objective, threshold=0.72)
+
     claims: list[dict[str, Any]] = []
     for claim in list(state.claims.values())[-40:]:
+        if claim.subtask_id not in relevant_task_ids and not relevant_text(claim.text):
+            continue
         source_urls = []
         for evidence_id in claim.evidence_ids:
             evidence = state.evidence.get(evidence_id)
@@ -949,22 +1064,59 @@ def build_global_context_slice(state: GlobalResearchState, subtask: SubTask) -> 
                 "id": claim.id,
                 "text": claim.text,
                 "confidence": claim.confidence,
+                "dimensions": claim.dimensions,
                 "source_urls": source_urls,
             }
         )
+    dependency_context = []
+    for dependency_id in subtask.depends_on:
+        dependency = state.tasks.get(dependency_id)
+        result = state.agent_results.get(dependency_id)
+        if not dependency:
+            continue
+        dependency_context.append(
+            {
+                "task_id": dependency_id,
+                "status": dependency.status.value,
+                "objective": dependency.objective,
+                "answer_summary": result.answer_summary[:3000] if result else dependency.result_summary[:3000],
+                "unresolved_gaps": result.unresolved_gaps[-8:] if result else [],
+            }
+        )
+    relevant_gaps = [gap for gap in state.gaps if relevant_text(gap)][-20:]
     return {
         "subtask_coverage_targets": subtask.coverage_targets,
-        "global_query_ledger": state.query_ledger[-128:],
+        "task_query_ledger": state.query_ledger_by_task.get(subtask.id, [])[-64:],
+        "dependency_query_ledger": {
+            task_id: state.query_ledger_by_task.get(task_id, [])[-16:]
+            for task_id in subtask.depends_on
+        },
+        "dependency_context": dependency_context,
         "existing_claims": claims,
-        "global_gaps": state.gaps[-20:],
-        "global_conflicts": state.conflicts[-20:],
-        "coverage": state.coverage,
+        "global_gaps": relevant_gaps,
+        "global_conflicts": [
+            item for item in state.conflicts[-40:] if relevant_text(str(item))
+        ][-20:],
+        "coverage": {
+            key: value
+            for key, value in state.coverage.items()
+            if normalize_text(key) in target_terms or relevant_text(key)
+        },
     }
 
 
 def build_evidence_packet(state: GlobalResearchState) -> list[dict[str, Any]]:
     packet: list[dict[str, Any]] = []
-    for claim in state.claims.values():
+    claim_values = (
+        [
+            state.claims[claim_id]
+            for claim_id in state.report_dossier_claim_ids
+            if claim_id in state.claims
+        ]
+        if state.report_dossier_claim_ids
+        else list(state.claims.values())
+    )
+    for claim in claim_values:
         evidence_items: list[dict[str, Any]] = []
         by_relation: dict[str, list[dict[str, Any]]] = {
             "supports": [],
@@ -1004,6 +1156,9 @@ def build_evidence_packet(state: GlobalResearchState) -> list[dict[str, Any]]:
                     "confidence": claim.confidence,
                     "status": claim.status,
                     "qualifiers": claim.qualifiers,
+                    "dimensions": claim.dimensions,
+                    "required_source_types": claim.required_source_types,
+                    "missing_source_types": claim.missing_source_types,
                     "subtask_id": claim.subtask_id,
                     "subtask_objective": task.objective if task else "",
                     "coverage_targets": list(task.coverage_targets) if task else [],
@@ -1074,9 +1229,12 @@ def fallback_report(state: GlobalResearchState, packet: list[dict[str, Any]]) ->
         for item in packet:
             positive = item["supports"] or item["qualifies"]
             if positive:
-                lines.append(f"- {item['claim']}（来源：{positive[0]['source_url']}）")
+                lines.append(f"- {item['claim']}（来源：[[EVIDENCE:{positive[0]['evidence_id']}]]）")
             elif item["refutes"]:
-                lines.append(f"- 现有证据反驳或质疑“{item['claim']}”（来源：{item['refutes'][0]['source_url']}）")
+                lines.append(
+                    f"- 现有证据反驳或质疑“{item['claim']}”"
+                    f"（来源：[[EVIDENCE:{item['refutes'][0]['evidence_id']}]]）"
+                )
         lines.extend(["", "## 限制", "", "本报告仅使用系统已采集并登记的证据。"])
         return "\n".join(lines)
     lines = ["# Research Report", "", "## Executive summary", ""]
@@ -1085,14 +1243,29 @@ def fallback_report(state: GlobalResearchState, packet: list[dict[str, Any]]) ->
     for item in packet:
         positive = item["supports"] or item["qualifies"]
         if positive:
-            lines.append(f"- {item['claim']} (Source: {positive[0]['source_url']})")
+            lines.append(f"- {item['claim']} (Source: [[EVIDENCE:{positive[0]['evidence_id']}]])")
         elif item["refutes"]:
             lines.append(
                 f"- Available evidence refutes or disputes “{item['claim']}” "
-                f"(Source: {item['refutes'][0]['source_url']})"
+                f"(Source: [[EVIDENCE:{item['refutes'][0]['evidence_id']}]])"
             )
     lines.extend(["", "## Limitations", "", "This report uses only evidence collected and registered by the research system."])
     return "\n".join(lines)
+
+
+def render_evidence_citations(article: str, state: GlobalResearchState) -> str:
+    """Resolve model-selected evidence IDs to exact registered Markdown links."""
+
+    def replace_token(match: re.Match[str]) -> str:
+        evidence_id = match.group(1)
+        evidence = state.evidence.get(evidence_id)
+        source = state.sources.get(evidence.source_id) if evidence else None
+        if source is None or not source.url:
+            return "[unresolved evidence citation]"
+        title = re.sub(r"[\[\]]", "", source.title).strip() or source.independence_group or "source"
+        return f"[{title[:160]}]({source.url})"
+
+    return EVIDENCE_CITATION_RE.sub(replace_token, str(article or ""))
 
 
 def fallback_audit(state: GlobalResearchState) -> AuditResult:
@@ -1109,8 +1282,10 @@ def fallback_audit(state: GlobalResearchState) -> AuditResult:
     ]
     repairs = [] if passed else [
         {
-            "objective": "Verify major draft claims and obtain exact source URLs for unsupported statements.",
+            "objective": "Revise the draft using registered evidence citation tokens and remove unsupported statements.",
             "coverage_targets": ["audit:deterministic_check"],
+            "repair_kind": "rewrite",
+            "requires_search": False,
         }
     ]
     return AuditResult(passed=passed, issues=issues, repair_tasks=repairs, summary="fallback audit")

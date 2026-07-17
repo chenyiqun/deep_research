@@ -114,7 +114,9 @@ ResearchRun + GlobalResearchState
 -> Search / Fetch / Reader produce Source, Evidence, and Claim records
 -> deterministic Reducers merge AgentResult objects
 -> Scheduler exhausts the current DAG frontier before Main may incrementally patch it
+-> partial/failed tasks may be reopened with REFINE_TASK; broad tasks are sharded and complex profiles receive adaptive local budgets
 -> Writer consumes a coverage-balanced, authority-ranked evidence dossier
+-> evidence-linked calculations run in a deterministic calculator; evidence-id citation tokens are rendered from registered Source URLs
 -> Citation Auditor passes, requests draft-only revision, or creates targeted research tasks
 -> final report remains compatible with RACE and FACT evaluation
 ```
@@ -136,7 +138,7 @@ run_state/<run_id>/artifacts/*
 ```
 
 The checkpoint contains the last fully reduced Researcher step, including its
-Source/Evidence/Claim records and usage. A restarted process resumes from that
+Source/Evidence/Claim/Calculation records and usage. A restarted process resumes from that
 semantic state; it never depends on chat history or a pinned GPU KV session. If
 a terminal Researcher bundle was saved just before a process failure, the
 workflow merges that bundle before applying new budget checks.
@@ -198,6 +200,13 @@ MAX_CONCURRENT_URL_FETCHES=16 \
 URL_FETCH_TIMEOUT_S=30 \
 MAX_ROUNDS=3 \
 MAX_SEARCH_QUERIES_PER_ROUND=3 \
+MAX_REACT_STEPS=3 \
+MAX_TOOL_CALLS_PER_SUBTASK=18 \
+COMPLEX_TASK_MAX_STEPS=5 \
+COMPLEX_TASK_MAX_TOOL_CALLS=36 \
+COMPLEX_TASK_MAX_SEARCH_CALLS=10 \
+MAX_TARGETS_PER_SUBTASK=2 \
+MAX_TASK_ATTEMPTS=2 \
 SEARCH_TOP_K=5 \
 AUDIT_REPAIR_SEARCH_RESERVE=6 \
 AUDIT_REPAIR_TOOL_RESERVE=30 \
@@ -222,8 +231,18 @@ run_state/<run_id>/                     # durable global/local state, events, bu
 ```
 
 Each result/trace now includes `diagnostics` with task/coverage status counts,
-source-type distribution, high-authority source ratio, evidence relations,
-query duplication, empty-query steps, and the bounded active-gap count.
+task profiles/attempts, source-type distribution, high-authority source ratio,
+evidence relations, query filtering, requested/effective/forced finish counts,
+Reader rejection reasons, calculation/audit counts, and the bounded active-gap count.
+
+Compare two judge runs only on their common valid task IDs:
+
+```bash
+python scripts/compare_race_runs.py \
+  --baseline outputs/baseline/race_raw_results.jsonl \
+  --candidate outputs/candidate/race_raw_results.jsonl \
+  --output-file outputs/candidate/common_id_comparison.json
+```
 
 ### Run one arbitrary research question
 
@@ -247,7 +266,7 @@ state. Add `--resume` to continue an interrupted run.
 Important runtime controls include:
 
 - `--max-researchers`: parallel Researcher subtasks inside one run.
-- `--max-react-steps`: maximum local ReAct decisions per subtask.
+- `--max-react-steps`: base local ReAct decision limit. The runtime derives a bounded task-profile budget for comparison, time-series, quantitative, verify, and repair work.
 - `--max-subtasks` and `--max-rounds`: dynamic DAG and Main planning limits.
 - `--max-total-tool-calls`, `--max-total-searches`, and `--max-total-tokens`: run budgets.
 - `--max-audit-rounds`: Citation Audit and targeted repair limit.
@@ -258,6 +277,16 @@ Important runtime controls include:
 - `--max-concurrent-control-calls`, `--max-concurrent-long-calls`, and `--max-inflight-llm-tokens`: role-aware admission control.
 - `--forward-vllm-priority`: forward Main/Researcher/Reader/Writer priority to a vLLM server started with priority scheduling.
 - `--disable-structured-outputs`: compatibility escape hatch for older vLLM; the normal path uses JSON Schema.
+
+Budget semantics:
+
+- `max_tool_calls_per_subtask` counts both search dispatch and per-result Reader calls; a top-k=5 query can therefore consume about six tool calls.
+- Global budgets are hard run limits, while per-task budgets are complexity-aware admission limits. Raising only the global budget does not help a Researcher whose local task contract is exhausted.
+- Prefer `SEARCH_TOP_K=3` with more query diversity for open research. Large comparison/time-series tasks should be decomposed or assigned a larger task profile instead of returning many redundant results from one broad query.
+- `partial` is not a dead end: Main can refine/retry an existing task without creating a duplicate coverage node.
+
+Quality invariants and the ordered optimization checklist are maintained in
+[the canonical architecture](docs/deep_research_end_to_end_flow.md#02-质量回归后的必修清单与验收条件).
 
 The search endpoint supports six engines:
 

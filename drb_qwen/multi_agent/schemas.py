@@ -182,6 +182,8 @@ class SubTask:
     priority: int = 50
     max_steps: int = 3
     max_tool_calls: int = 9
+    max_search_calls: int = 0
+    research_profile: str = "standard"
     required_source_types: list[str] = field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
     attempts: int = 0
@@ -206,6 +208,8 @@ class SubTask:
             priority=max(0, min(100, safe_int(value.get("priority"), 50))),
             max_steps=max(1, safe_int(value.get("max_steps"), 3)),
             max_tool_calls=max(1, safe_int(value.get("max_tool_calls"), 9)),
+            max_search_calls=max(0, safe_int(value.get("max_search_calls"), 0)),
+            research_profile=str(value.get("research_profile", "standard") or "standard"),
             required_source_types=string_list(value.get("required_source_types")),
             status=enum_value(TaskStatus, value.get("status"), TaskStatus.PENDING),
             attempts=max(0, safe_int(value.get("attempts"), 0)),
@@ -296,6 +300,9 @@ class ClaimRecord:
     confidence: str = "medium"
     status: str = "provisional"
     qualifiers: list[str] = field(default_factory=list)
+    dimensions: dict[str, str] = field(default_factory=dict)
+    required_source_types: list[str] = field(default_factory=list)
+    missing_source_types: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -312,8 +319,55 @@ class ClaimRecord:
             confidence=str(value.get("confidence", "medium")),
             status=str(value.get("status", "provisional")),
             qualifiers=string_list(value.get("qualifiers")),
+            dimensions={
+                str(key): str(item)
+                for key, item in value.get("dimensions", {}).items()
+                if str(item).strip()
+            } if isinstance(value.get("dimensions"), dict) else {},
+            required_source_types=string_list(value.get("required_source_types")),
+            missing_source_types=string_list(value.get("missing_source_types")),
             created_at=str(value.get("created_at", utc_now())),
             updated_at=str(value.get("updated_at", utc_now())),
+        )
+
+
+@dataclass
+class CalculationRecord:
+    id: str
+    subtask_id: str
+    operation: str
+    inputs: list[dict[str, Any]]
+    formula: str
+    result: float
+    unit: str = ""
+    period: str = ""
+    scope: str = ""
+    assumptions: list[str] = field(default_factory=list)
+    description: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    confidence: str = "medium"
+    created_at: str = field(default_factory=utc_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return jsonable(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "CalculationRecord":
+        return cls(
+            id=str(value.get("id", "")),
+            subtask_id=str(value.get("subtask_id", "")),
+            operation=str(value.get("operation", "")),
+            inputs=[item for item in value.get("inputs", []) if isinstance(item, dict)],
+            formula=str(value.get("formula", "")),
+            result=safe_float(value.get("result"), 0.0),
+            unit=str(value.get("unit", "")),
+            period=str(value.get("period", "")),
+            scope=str(value.get("scope", "")),
+            assumptions=string_list(value.get("assumptions")),
+            description=str(value.get("description", "")),
+            evidence_ids=string_list(value.get("evidence_ids")),
+            confidence=str(value.get("confidence", "medium")),
+            created_at=str(value.get("created_at", utc_now())),
         )
 
 
@@ -357,6 +411,7 @@ class LocalResearchState:
     source_ids: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     claim_ids: list[str] = field(default_factory=list)
+    calculation_ids: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
     resolved_gaps: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
@@ -384,6 +439,7 @@ class LocalResearchState:
             source_ids=string_list(value.get("source_ids")),
             evidence_ids=string_list(value.get("evidence_ids")),
             claim_ids=string_list(value.get("claim_ids")),
+            calculation_ids=string_list(value.get("calculation_ids")),
             gaps=string_list(value.get("gaps")),
             resolved_gaps=string_list(value.get("resolved_gaps")),
             conflicts=[item for item in value.get("conflicts", []) if isinstance(item, dict)],
@@ -405,6 +461,7 @@ class AgentResult:
     claim_ids: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     source_ids: list[str] = field(default_factory=list)
+    calculation_ids: list[str] = field(default_factory=list)
     unresolved_gaps: list[str] = field(default_factory=list)
     resolved_gaps: list[str] = field(default_factory=list)
     conflicts: list[dict[str, Any]] = field(default_factory=list)
@@ -424,6 +481,7 @@ class AgentResult:
             claim_ids=string_list(value.get("claim_ids")),
             evidence_ids=string_list(value.get("evidence_ids")),
             source_ids=string_list(value.get("source_ids")),
+            calculation_ids=string_list(value.get("calculation_ids")),
             unresolved_gaps=string_list(value.get("unresolved_gaps")),
             resolved_gaps=string_list(value.get("resolved_gaps")),
             conflicts=[item for item in value.get("conflicts", []) if isinstance(item, dict)],
@@ -464,8 +522,10 @@ class GlobalResearchState:
     sources: dict[str, SourceRecord] = field(default_factory=dict)
     evidence: dict[str, EvidenceRecord] = field(default_factory=dict)
     claims: dict[str, ClaimRecord] = field(default_factory=dict)
+    calculations: dict[str, CalculationRecord] = field(default_factory=dict)
     agent_results: dict[str, AgentResult] = field(default_factory=dict)
     query_ledger: list[str] = field(default_factory=list)
+    query_ledger_by_task: dict[str, list[str]] = field(default_factory=dict)
     coverage: dict[str, str] = field(default_factory=dict)
     coverage_details: dict[str, dict[str, Any]] = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
@@ -475,6 +535,9 @@ class GlobalResearchState:
     audit_round: int = 0
     article: str = ""
     audit: AuditResult | None = None
+    audit_history: list[AuditResult] = field(default_factory=list)
+    report_dossier_claim_ids: list[str] = field(default_factory=list)
+    report_dossier_calculation_ids: list[str] = field(default_factory=list)
     stop_reason: str = ""
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -506,8 +569,18 @@ class GlobalResearchState:
             sources={str(k): SourceRecord.from_dict(v) for k, v in value.get("sources", {}).items() if isinstance(v, dict)},
             evidence={str(k): EvidenceRecord.from_dict(v) for k, v in value.get("evidence", {}).items() if isinstance(v, dict)},
             claims={str(k): ClaimRecord.from_dict(v) for k, v in value.get("claims", {}).items() if isinstance(v, dict)},
+            calculations={
+                str(k): CalculationRecord.from_dict(v)
+                for k, v in value.get("calculations", {}).items()
+                if isinstance(v, dict)
+            },
             agent_results={str(k): AgentResult.from_dict(v) for k, v in value.get("agent_results", {}).items() if isinstance(v, dict)},
             query_ledger=string_list(value.get("query_ledger"), 256),
+            query_ledger_by_task={
+                str(k): string_list(v, 64)
+                for k, v in value.get("query_ledger_by_task", {}).items()
+                if isinstance(v, list)
+            },
             coverage={str(k): str(v) for k, v in value.get("coverage", {}).items()},
             coverage_details={
                 str(k): dict(v)
@@ -521,6 +594,15 @@ class GlobalResearchState:
             audit_round=max(0, safe_int(value.get("audit_round"), 0)),
             article=str(value.get("article", "")),
             audit=AuditResult.from_dict(audit_value) if isinstance(audit_value, dict) else None,
+            audit_history=[
+                AuditResult.from_dict(item)
+                for item in value.get("audit_history", [])
+                if isinstance(item, dict)
+            ],
+            report_dossier_claim_ids=string_list(value.get("report_dossier_claim_ids")),
+            report_dossier_calculation_ids=string_list(
+                value.get("report_dossier_calculation_ids")
+            ),
             stop_reason=str(value.get("stop_reason", "")),
             created_at=str(value.get("created_at", utc_now())),
             updated_at=str(value.get("updated_at", utc_now())),
@@ -535,6 +617,9 @@ class GlobalResearchState:
                 "evidence_ids": claim.evidence_ids,
                 "confidence": claim.confidence,
                 "status": claim.status,
+                "dimensions": claim.dimensions,
+                "required_source_types": claim.required_source_types,
+                "missing_source_types": claim.missing_source_types,
             }
             for claim in list(self.claims.values())[-max_claims:]
         ]
@@ -545,7 +630,11 @@ class GlobalResearchState:
             "brief": self.brief.to_dict() if self.brief else None,
             "tasks": tasks,
             "query_ledger": self.query_ledger[-128:],
+            "query_ledger_by_task": {
+                key: values[-32:] for key, values in self.query_ledger_by_task.items()
+            },
             "claims": claims,
+            "calculations": [item.to_dict() for item in self.calculations.values()],
             "coverage": self.coverage,
             "coverage_details": self.coverage_details,
             "gaps": self.gaps,
@@ -554,6 +643,9 @@ class GlobalResearchState:
             "main_round": self.main_round,
             "audit_round": self.audit_round,
             "audit": self.audit.to_dict() if self.audit else None,
+            "audit_history": [item.to_dict() for item in self.audit_history],
+            "report_dossier_claim_ids": self.report_dossier_claim_ids,
+            "report_dossier_calculation_ids": self.report_dossier_calculation_ids,
         }
 
 
@@ -564,6 +656,7 @@ class ResearchExecutionBundle:
     sources: list[SourceRecord] = field(default_factory=list)
     evidence: list[EvidenceRecord] = field(default_factory=list)
     claims: list[ClaimRecord] = field(default_factory=list)
+    calculations: list[CalculationRecord] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
 
 

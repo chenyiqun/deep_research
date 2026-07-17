@@ -59,6 +59,7 @@ PRIMARY_ORGANIZATION_HOSTS = {
     "who.int",
     "un.org",
     "wgc.org",
+    "gold.org",
 }
 
 

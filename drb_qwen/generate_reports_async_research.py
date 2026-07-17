@@ -60,6 +60,8 @@ async def run_task(
                         "state": result["state"],
                         "trace": result["trace"],
                         "audit": result.get("audit"),
+                        "diagnostics": result.get("diagnostics", {}),
+                        "inference": result.get("inference", {}),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -75,6 +77,7 @@ async def run_task(
             "model": model_name,
             "run_id": result.get("run_id"),
             "research_phase": result.get("state", {}).get("phase"),
+            "research_diagnostics": result.get("diagnostics", {}),
         }
         if trace_path is not None:
             row["research_trace_file"] = str(trace_path)
@@ -340,6 +343,11 @@ async def run_async(args: argparse.Namespace) -> None:
         max_new_tasks_per_round=args.max_new_tasks_per_round,
         max_react_steps=args.max_react_steps,
         max_tool_calls_per_subtask=args.max_tool_calls_per_subtask,
+        complex_task_max_steps=args.complex_task_max_steps,
+        complex_task_max_tool_calls=args.complex_task_max_tool_calls,
+        complex_task_max_search_calls=args.complex_task_max_search_calls,
+        max_targets_per_subtask=args.max_targets_per_subtask,
+        max_task_attempts=args.max_task_attempts,
         max_total_tool_calls=args.max_total_tool_calls,
         max_total_searches=args.max_total_searches,
         max_total_tokens=args.max_total_tokens,
@@ -391,6 +399,15 @@ async def run_async(args: argparse.Namespace) -> None:
     print(f"Max researchers per run: {args.max_researchers}")
     print(f"Max subtasks per run: {args.max_subtasks}")
     print(f"Max ReAct steps per subtask: {args.max_react_steps}")
+    print(f"Base tool calls per subtask: {args.max_tool_calls_per_subtask}")
+    print(
+        "Complex task limits: "
+        f"steps={args.complex_task_max_steps} "
+        f"tools={args.complex_task_max_tool_calls} "
+        f"searches={args.complex_task_max_search_calls}"
+    )
+    print(f"Max coverage targets per subtask: {args.max_targets_per_subtask}")
+    print(f"Max task attempts: {args.max_task_attempts}")
     print(f"Max total tool calls per run: {args.max_total_tool_calls}")
     print(f"Max total tokens per run: {args.max_total_tokens}")
     print(f"Search count: {args.search_count}")
@@ -532,6 +549,11 @@ def main() -> None:
     parser.add_argument("--max-new-tasks-per-round", type=int, default=3)
     parser.add_argument("--max-react-steps", type=int, default=3)
     parser.add_argument("--max-tool-calls-per-subtask", type=int, default=18)
+    parser.add_argument("--complex-task-max-steps", type=int, default=5)
+    parser.add_argument("--complex-task-max-tool-calls", type=int, default=36)
+    parser.add_argument("--complex-task-max-search-calls", type=int, default=10)
+    parser.add_argument("--max-targets-per-subtask", type=int, default=2)
+    parser.add_argument("--max-task-attempts", type=int, default=2)
     parser.add_argument("--max-total-tool-calls", type=int, default=160)
     parser.add_argument("--max-total-searches", type=int, default=30)
     parser.add_argument("--max-total-tokens", type=int, default=1_000_000)

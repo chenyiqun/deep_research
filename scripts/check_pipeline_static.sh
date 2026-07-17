@@ -21,6 +21,7 @@ PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/drb_qwen_pycache}" \
     scripts/test_all_search_engines.py \
     scripts/test_web_search.py \
     scripts/test_search_url_fetch.py \
+    scripts/compare_race_runs.py \
     tests/smoke_test_scoring.py \
     tests/smoke_test_url_fetcher.py \
     tests/smoke_test_async_workflow.py \
@@ -37,6 +38,7 @@ PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" -m drb_qwen.evaluate_race_async --help 
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_all_search_engines.py --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_web_search.py --help >/dev/null
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/test_search_url_fetch.py --help >/dev/null
+PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" scripts/compare_race_runs.py --help >/dev/null
 
 echo "[4/9] Running scoring smoke test"
 PYTHONPATH="${REPO_DIR}" "${PYTHON_BIN}" tests/smoke_test_scoring.py

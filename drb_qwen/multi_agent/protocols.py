@@ -96,6 +96,38 @@ RESEARCHER_DECISION_SCHEMA: dict[str, Any] = {
                 "required": ["type", "query"],
             },
         },
+        "calculations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "enum": ["ratio", "percentage", "difference", "percent_change", "sum", "cagr", "rank"],
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "value": {"type": "number"},
+                                "evidence_id": {"type": "string"},
+                            },
+                            "required": ["label", "value", "evidence_id"],
+                        },
+                    },
+                    "periods": {"type": "number"},
+                    "period": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["higher", "lower"]},
+                    "unit": {"type": "string"},
+                    "scope": {"type": "string"},
+                    "assumptions": STRING_ARRAY,
+                    "description": {"type": "string"},
+                },
+                "required": ["operation", "inputs", "scope"],
+            },
+        },
         "add_gaps": STRING_ARRAY,
         "resolved_gaps": STRING_ARRAY,
         "add_conflicts": {"type": "array", "items": {"type": "object"}},
@@ -104,7 +136,7 @@ RESEARCHER_DECISION_SCHEMA: dict[str, Any] = {
         "finish": {"type": "boolean"},
         "stop_reason": {"type": "string"},
     },
-    "required": ["base_local_version", "assessment", "actions", "answer_summary", "finish"],
+    "required": ["base_local_version", "assessment", "actions", "calculations", "answer_summary", "finish"],
 }
 
 
@@ -123,6 +155,8 @@ READER_SCHEMA: dict[str, Any] = {
                     "relation": {"type": "string", "enum": ["supports", "refutes", "qualifies"]},
                     "locator": {"type": "string"},
                     "qualifiers": STRING_ARRAY,
+                    "dimensions": {"type": "object"},
+                    "required_source_types": STRING_ARRAY,
                 },
                 "required": ["text", "excerpt", "confidence", "relation"],
             },

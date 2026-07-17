@@ -2,6 +2,7 @@
 
 from .schemas import (
     AgentResult,
+    CalculationRecord,
     GlobalResearchState,
     LocalResearchState,
     RunPhase,
@@ -17,6 +18,7 @@ __all__ = [
     "AgentInferenceConfig",
     "AgentInferenceGateway",
     "AsyncDeepResearchWorkflow",
+    "CalculationRecord",
     "DeepResearchConfig",
     "GlobalResearchState",
     "LocalResearchState",

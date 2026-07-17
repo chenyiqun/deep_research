@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import time
 from typing import Any
 
+from ..url_utils import extract_urls
 from .agents import (
     CitationAuditor,
     MainAgent,
@@ -17,10 +18,12 @@ from .dag import (
     DecisionValidationError,
     add_initial_tasks,
     all_tasks_terminal,
+    apply_adaptive_task_budgets,
     apply_decision_patch,
     blocked_tasks,
     ready_tasks,
     reset_interrupted_tasks,
+    split_overloaded_tasks,
 )
 from .context import ResearcherContextBuilder, TokenCounter
 from .inference import AgentInferenceConfig, AgentInferenceGateway
@@ -72,6 +75,11 @@ class DeepResearchConfig:
     max_new_tasks_per_round: int = 3
     max_react_steps: int = 3
     max_tool_calls_per_subtask: int = 18
+    complex_task_max_steps: int = 5
+    complex_task_max_tool_calls: int = 36
+    complex_task_max_search_calls: int = 10
+    max_targets_per_subtask: int = 2
+    max_task_attempts: int = 2
     max_total_tool_calls: int = 160
     max_total_searches: int = 30
     max_total_tokens: int = 1_000_000
@@ -125,6 +133,11 @@ class DeepResearchConfig:
             "max_new_tasks_per_round",
             "max_react_steps",
             "max_tool_calls_per_subtask",
+            "complex_task_max_steps",
+            "complex_task_max_tool_calls",
+            "complex_task_max_search_calls",
+            "max_targets_per_subtask",
+            "max_task_attempts",
             "max_total_tool_calls",
             "max_total_searches",
             "max_total_tokens",
@@ -150,6 +163,20 @@ class DeepResearchConfig:
             raise ValueError("max_initial_tasks cannot exceed max_subtasks")
         if self.min_rounds > self.max_rounds:
             raise ValueError("min_rounds cannot exceed max_rounds")
+        # Preserve the old CLI contract: raising a base per-task limit must not
+        # fail merely because the new adaptive ceilings were left at defaults.
+        self.complex_task_max_steps = max(
+            self.complex_task_max_steps,
+            self.max_react_steps,
+        )
+        self.complex_task_max_tool_calls = max(
+            self.complex_task_max_tool_calls,
+            self.max_tool_calls_per_subtask,
+        )
+        self.complex_task_max_search_calls = max(
+            self.complex_task_max_search_calls,
+            self.max_react_steps * self.max_search_queries_per_round,
+        )
         if (
             self.audit_repair_search_reserve < 0
             or self.audit_repair_tool_reserve < 0
@@ -308,9 +335,21 @@ class AsyncDeepResearchWorkflow:
                     state.phase = RunPhase.RESEARCHING
                     state.stop_reason = ""
             reset_ids = reset_interrupted_tasks(state)
-            if reset_ids:
+            resume_normalization = self._normalize_task_dag(state) if state.tasks else {
+                "split_task_ids": [],
+                "adaptive_budget_changes": [],
+            }
+            if reset_ids or resume_normalization["split_task_ids"] or resume_normalization["adaptive_budget_changes"]:
                 state.bump_version()
-            self._record(trace, state, "run_resumed", {"reset_task_ids": reset_ids})
+            self._record(
+                trace,
+                state,
+                "run_resumed",
+                {
+                    "reset_task_ids": reset_ids,
+                    "task_normalization": resume_normalization,
+                },
+            )
             self.store.save_global(state)
         try:
             while not state.terminal:
@@ -325,6 +364,7 @@ class AsyncDeepResearchWorkflow:
                     continue
 
                 if state.phase == RunPhase.WRITING:
+                    dossier_update = self._refresh_report_dossier(state)
                     (
                         state.article,
                         evidence_packet,
@@ -358,9 +398,14 @@ class AsyncDeepResearchWorkflow:
                         {
                             "article_chars": len(state.article),
                             "evidence_packet_items": len(evidence_packet),
+                            "dossier_omitted_claims": int(
+                                writer_usage.get("dossier_omitted_claims", 0)
+                            ),
+                            "rendered_citation_urls": len(extract_urls(state.article)),
                             "used_fallback": writer_used_fallback,
                             "artifact_id": draft_artifact_id,
                             "next_phase": state.phase.value,
+                            "report_dossier": dossier_update,
                         },
                     )
                     self.store.save_global(state)
@@ -431,6 +476,8 @@ class AsyncDeepResearchWorkflow:
             )
             plan.used_fallback = True
             self._record(trace, state, "main_plan_rejected", {"error": str(exc)})
+        plan_normalization = self._normalize_task_dag(state)
+        added.extend(plan_normalization["split_task_ids"])
         initialize_coverage(state)
         state.phase = RunPhase.RESEARCHING
         state.bump_version()
@@ -443,9 +490,64 @@ class AsyncDeepResearchWorkflow:
                 "task_ids": added,
                 "used_fallback": plan.used_fallback,
                 "brief": state.brief.to_dict() if state.brief else {},
+                "task_normalization": plan_normalization,
             },
         )
         self.store.save_global(state)
+
+    def _normalize_task_dag(self, state: GlobalResearchState) -> dict[str, Any]:
+        split_task_ids = split_overloaded_tasks(
+            state,
+            max_targets_per_task=self.config.max_targets_per_subtask,
+            max_subtasks=self.config.max_subtasks,
+        )
+        budget_changes = apply_adaptive_task_budgets(
+            state,
+            base_steps=self.config.max_react_steps,
+            base_tool_calls=self.config.max_tool_calls_per_subtask,
+            complex_max_steps=self.config.complex_task_max_steps,
+            complex_max_tool_calls=self.config.complex_task_max_tool_calls,
+            complex_max_search_calls=self.config.complex_task_max_search_calls,
+            max_queries_per_step=self.config.max_search_queries_per_round,
+        )
+        return {
+            "split_task_ids": split_task_ids,
+            "adaptive_budget_changes": budget_changes,
+        }
+
+    def _reset_refined_task_executions(
+        self,
+        state: GlobalResearchState,
+        task_ids: list[str],
+    ) -> None:
+        for task_id in task_ids:
+            state.agent_results.pop(task_id, None)
+            self.store.clear_task_execution(state.run_id, task_id)
+
+    @staticmethod
+    def _refresh_report_dossier(state: GlobalResearchState) -> dict[str, Any]:
+        previous_claims = set(state.report_dossier_claim_ids)
+        previous_calculations = set(state.report_dossier_calculation_ids)
+        for claim_id in state.claims:
+            if claim_id not in previous_claims:
+                state.report_dossier_claim_ids.append(claim_id)
+        for calculation_id in state.calculations:
+            if calculation_id not in previous_calculations:
+                state.report_dossier_calculation_ids.append(calculation_id)
+        return {
+            "claim_count": len(state.report_dossier_claim_ids),
+            "calculation_count": len(state.report_dossier_calculation_ids),
+            "new_claim_ids": [
+                claim_id
+                for claim_id in state.report_dossier_claim_ids
+                if claim_id not in previous_claims
+            ],
+            "new_calculation_ids": [
+                calculation_id
+                for calculation_id in state.report_dossier_calculation_ids
+                if calculation_id not in previous_calculations
+            ],
+        }
 
     async def _research_phase(self, state: GlobalResearchState, trace: list[dict[str, Any]]) -> None:
         state.phase = RunPhase.RESEARCHING
@@ -516,7 +618,9 @@ class AsyncDeepResearchWorkflow:
                 execution_tasks.append(replace(task, max_tool_calls=allocation))
                 allocatable -= allocation
 
-                task_search_ceiling = task.max_steps * self.config.max_search_queries_per_round
+                task_search_ceiling = task.max_search_calls or (
+                    task.max_steps * self.config.max_search_queries_per_round
+                )
                 search_allocation = min(
                     task_search_ceiling,
                     allocatable_searches - tasks_after,
@@ -646,12 +750,18 @@ class AsyncDeepResearchWorkflow:
                     max_steps=self.config.max_react_steps,
                     max_tool_calls=self.config.max_tool_calls_per_subtask,
                     max_new_tasks=self.config.max_new_tasks_per_round,
+                    max_task_attempts=self.config.max_task_attempts,
                 )
+                self._reset_refined_task_executions(state, compiled.refined_task_ids)
+                normalization = self._normalize_task_dag(state)
+                compiled.added_task_ids.extend(normalization["split_task_ids"])
                 patch_result = {
                     "added_task_ids": compiled.added_task_ids,
+                    "refined_task_ids": compiled.refined_task_ids,
                     "cancelled_task_ids": compiled.cancelled_task_ids,
                     "changed_task_ids": compiled.changed_task_ids,
                     "warnings": compiled.warnings,
+                    "task_normalization": normalization,
                 }
             except DecisionValidationError as exc:
                 action = "write" if state.claims else "partial"
@@ -714,6 +824,7 @@ class AsyncDeepResearchWorkflow:
         if self._sync_cancelled(state):
             return
         state.audit = audit
+        state.audit_history.append(audit)
         state.budget.auditor_calls += 1
         state.budget.add(auditor_usage)
         state.bump_version()
@@ -741,9 +852,9 @@ class AsyncDeepResearchWorkflow:
             self.store.save_global(state)
             return
 
-        if state.audit_round >= self.config.max_audit_rounds or not audit.repair_tasks:
+        if not audit.repair_tasks:
             state.phase = RunPhase.PARTIAL
-            state.stop_reason = "citation audit did not pass within the repair budget"
+            state.stop_reason = "citation audit failed without an actionable repair"
             state.bump_version()
             self.store.save_global(state)
             return
@@ -753,16 +864,49 @@ class AsyncDeepResearchWorkflow:
             for item in audit.repair_tasks
             if bool(item.get("requires_search", True))
         ]
+        rewrite_repairs = [
+            item
+            for item in audit.repair_tasks
+            if not bool(item.get("requires_search", True))
+        ]
         if not search_repairs:
-            state.phase = RunPhase.WRITING
-            state.stop_reason = ""
+            if state.audit_round <= self.config.max_audit_rounds:
+                state.phase = RunPhase.WRITING
+                state.stop_reason = ""
+                state.bump_version()
+                self._record(
+                    trace,
+                    state,
+                    "audit_revision_planned",
+                    {"repair_tasks": audit.repair_tasks, "mode": "rewrite_only"},
+                )
+                self.store.save_global(state)
+            else:
+                state.phase = RunPhase.PARTIAL
+                state.stop_reason = "citation audit did not pass after the final rewrite"
+                state.bump_version()
+                self.store.save_global(state)
+            return
+
+        if state.audit_round >= self.config.max_audit_rounds:
+            if state.audit_round == self.config.max_audit_rounds and rewrite_repairs:
+                state.phase = RunPhase.WRITING
+                state.stop_reason = "qualified partial report: new-evidence audit repair budget exhausted"
+                state.bump_version()
+                self._record(
+                    trace,
+                    state,
+                    "audit_revision_planned",
+                    {
+                        "repair_tasks": rewrite_repairs,
+                        "mode": "final_rewrite_without_new_evidence",
+                    },
+                )
+                self.store.save_global(state)
+                return
+            state.phase = RunPhase.PARTIAL
+            state.stop_reason = "citation audit needs new evidence but the repair budget is exhausted"
             state.bump_version()
-            self._record(
-                trace,
-                state,
-                "audit_revision_planned",
-                {"repair_tasks": audit.repair_tasks, "mode": "rewrite_only"},
-            )
             self.store.save_global(state)
             return
 
@@ -780,8 +924,12 @@ class AsyncDeepResearchWorkflow:
                 max_steps=self.config.max_react_steps,
                 max_tool_calls=self.config.max_tool_calls_per_subtask,
                 max_new_tasks=self.config.max_repair_tasks,
+                max_task_attempts=self.config.max_task_attempts,
             )
-            added = compiled.added_task_ids
+            self._reset_refined_task_executions(state, compiled.refined_task_ids)
+            normalization = self._normalize_task_dag(state)
+            compiled.added_task_ids.extend(normalization["split_task_ids"])
+            added = list(dict.fromkeys([*compiled.added_task_ids, *compiled.refined_task_ids]))
             warnings = compiled.warnings
         except DecisionValidationError as exc:
             fallback = audit_repair_patch(state)
@@ -792,8 +940,12 @@ class AsyncDeepResearchWorkflow:
                 max_steps=self.config.max_react_steps,
                 max_tool_calls=self.config.max_tool_calls_per_subtask,
                 max_new_tasks=self.config.max_repair_tasks,
+                max_task_attempts=self.config.max_task_attempts,
             )
-            added = compiled.added_task_ids
+            self._reset_refined_task_executions(state, compiled.refined_task_ids)
+            normalization = self._normalize_task_dag(state)
+            compiled.added_task_ids.extend(normalization["split_task_ids"])
+            added = list(dict.fromkeys([*compiled.added_task_ids, *compiled.refined_task_ids]))
             warnings = [str(exc), *compiled.warnings]
             used_fallback = True
         if not added and search_repairs:
@@ -805,8 +957,12 @@ class AsyncDeepResearchWorkflow:
                 max_steps=self.config.max_react_steps,
                 max_tool_calls=self.config.max_tool_calls_per_subtask,
                 max_new_tasks=self.config.max_repair_tasks,
+                max_task_attempts=self.config.max_task_attempts,
             )
-            added = compiled.added_task_ids
+            self._reset_refined_task_executions(state, compiled.refined_task_ids)
+            normalization = self._normalize_task_dag(state)
+            compiled.added_task_ids.extend(normalization["split_task_ids"])
+            added = list(dict.fromkeys([*compiled.added_task_ids, *compiled.refined_task_ids]))
             warnings = [*warnings, "Main repair patch produced no executable task; used audit repair items.", *compiled.warnings]
             used_fallback = True
         initialize_coverage(state)
@@ -960,7 +1116,25 @@ def runtime_diagnostics(
     queries: list[str] = []
     empty_query_steps = 0
     finish_requests = 0
+    finish_effective = 0
+    finish_forced = 0
+    rejection_counts: Counter[str] = Counter()
+    saturated_task_ids: set[str] = set()
+    dossier_omitted_claims = 0
+    duplicate_filtered_queries = 0
+    budget_filtered_queries = 0
+    rendered_citation_urls = 0
     for event in trace:
+        if event.get("type") == "report_written":
+            report_payload = event.get("payload", {})
+            if isinstance(report_payload, dict):
+                dossier_omitted_claims = max(
+                    dossier_omitted_claims,
+                    int(report_payload.get("dossier_omitted_claims", 0)),
+                )
+                rendered_citation_urls = int(
+                    report_payload.get("rendered_citation_urls", rendered_citation_urls)
+                )
         if event.get("type") != "researcher_step":
             continue
         payload = event.get("payload", {})
@@ -968,8 +1142,24 @@ def runtime_diagnostics(
         if not values:
             empty_query_steps += 1
         queries.extend(str(value) for value in values if str(value).strip())
+        if isinstance(payload, dict):
+            duplicate_filtered_queries += len(payload.get("duplicate_filtered_queries", []))
+            budget_filtered_queries += len(payload.get("budget_filtered_queries", []))
         if isinstance(payload, dict) and payload.get("finish_requested"):
             finish_requests += 1
+        if isinstance(payload, dict) and payload.get("finish_effective"):
+            finish_effective += 1
+        if isinstance(payload, dict) and payload.get("finish_forced"):
+            finish_forced += 1
+        if isinstance(payload, dict):
+            for key, value in payload.get("rejection_counts", {}).items():
+                rejection_counts[str(key)] += int(value)
+            if int(payload.get("local_tool_calls_after", 0)) >= int(
+                payload.get("task_tool_call_limit", 1)
+            ):
+                task_id = str(payload.get("subtask_id", ""))
+                if task_id:
+                    saturated_task_ids.add(task_id)
     normalized_queries = [normalize_text(query) for query in queries]
     source_types = Counter(source.source_type for source in state.sources.values())
     high_authority = sum(1 for source in state.sources.values() if source.authority_score >= 0.8)
@@ -985,8 +1175,21 @@ def runtime_diagnostics(
         "query_calls": len(queries),
         "unique_queries": len(set(normalized_queries)),
         "duplicate_query_calls": len(queries) - len(set(normalized_queries)),
+        "duplicate_filtered_queries": duplicate_filtered_queries,
+        "budget_filtered_queries": budget_filtered_queries,
         "empty_query_steps": empty_query_steps,
         "finish_requested_steps": finish_requests,
+        "finish_effective_steps": finish_effective,
+        "finish_forced_steps": finish_forced,
+        "reader_rejection_counts": dict(rejection_counts),
+        "task_profiles": dict(Counter(task.research_profile for task in state.tasks.values())),
+        "task_attempts": dict(Counter(str(task.attempts) for task in state.tasks.values())),
+        "tasks_at_local_tool_limit": len(saturated_task_ids),
+        "calculation_count": len(state.calculations),
+        "audit_rounds": len(state.audit_history),
+        "dossier_omitted_claims": dossier_omitted_claims,
+        "unresolved_citation_tokens": state.article.count("[unresolved evidence citation]"),
+        "rendered_citation_urls": rendered_citation_urls,
         "active_gap_count": len(state.gaps),
     }
 

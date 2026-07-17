@@ -1,7 +1,7 @@
 # Deep Research 系统主流程（Canonical Architecture）
 
-版本：v1.1
-日期：2026-07-16
+版本：v1.3
+日期：2026-07-17
 定位：本文是系统的唯一主流程说明；字段级协议、安全、评测和部署细节见[详细设计](./deep_research_multi_agent_design.md)。
 
 ## 0. 一句话结论
@@ -39,6 +39,50 @@
 - **Writer 使用 coverage-balanced dossier**：证据按 coverage 槽位轮转，并按交叉验证、来源权威和定量信息排序。比较、时间序列和财政口径任务有专门的同口径写作约束。
 - **Audit 区分研究修复和文本修复**：引用格式、删改不支持表述等问题直接进入 audit-guided revision；确实缺证据才启动 Researcher，并使用预留的 search/tool 预算。
 - **精确 token 与多语言引用**：Tokenizer 的 mapping/`BatchEncoding` 必须从 `input_ids` 计数；Markdown URL 和中文 `）。；` 等标点由统一解析器处理。
+
+### 0.2 质量回归后的必修清单与验收条件
+
+2026-07-17 对保险横向比较、黄金时间序列和房地产财政口径三个新 trace 的复核表明，工程正确性已经改善，但控制面仍会把有证据的任务锁在 `partial`。以下项目已按依赖顺序实现，并作为后续回归的固定验收清单：
+
+1. **Researcher 终止协议**：输出示例不得把 `finish` 固定为 false；到达最后一步时由运行时确定性终止。`sufficient` 与“有用但仍有缺口的 partial”都必须产生明确终态，不能依赖模型记得设置一个布尔值。
+2. **Task-scoped context**：Researcher 只接收与本 SubTask coverage/objective 相关的 global gaps、claims 和 conflicts。Query 去重默认限于本 SubTask；Verify/Repair 可以复用 discovery query，但必须改变来源、时间、实体或验证目标。Trace 同时记录 raw、accepted 和 duplicate-filtered queries。
+3. **Partial task 可继续执行**：Main 支持 `REFINE_TASK`，将已有 partial/failed task 重新置为 pending，并更新 objective、预算和来源要求。禁止出现“Main 要 continue，但所有 ADD_TASK 都被去重且没有 READY task”的空转。
+4. **自适应任务预算**：Search、Reader 和模型 step 分开计量。任务按照 standard/verify/comparison/time_series/quantitative/repair profile 获得不同的 steps、search、reader/tool 上限；全局预算仍是硬门禁。增加预算不能只制造更多低质量 Claim。
+5. **规划粒度校验**：比较任务先定义统一实体集合和字段 schema；时间序列先定义区间/频率；定量问题先定义分子、分母、单位和口径。一个 SubTask 不得同时承载无法在其预算内完成的大型矩阵。
+6. **来源要求落到 coverage/Claim**：`primary + independent` 不再是所有 task 的机械默认。关键排名、财务、评级和财政数字要求 primary；观点和预测要求独立交叉验证。Source authority 补齐真实机构域名，官方来源被 Reader 拒绝时必须记录具体原因。
+7. **Coverage Gate 以证据充分性为准**：task status、来源要求和 coverage status 解耦；一个 partial task 也可以覆盖已满足的 coverage cell。Gate 使用 `coverage_details` 的 Claim、来源、缺口和质量，而不是让“全 partial”永远只能得到 0.5。
+8. **Evidence 聚合层**：Writer 前先按 `entity × metric × period × geography × accounting_scope` 合并重复 Claim，生成稳定的 coverage dossier。比较、时间序列和财政问题使用结构化矩阵，不直接向 Writer 倾倒上百条扁平 Claim。
+9. **可审计派生计算**：CAGR、占比、变化量、排名和情景结果必须保存 CalculationRecord，包括公式、输入 Evidence、单位、期间、分母和假设；Writer 不得自行补算无记录数字。
+10. **确定性引用**：Writer 引用 Source/Evidence ID，Renderer 从 Evidence Store 注入精确 Markdown URL；模型不再自由拼写、缩短或改写 URL。Audit 使用稳定的 cited-evidence dossier，而不是每轮重新随机采样。
+11. **Audit 修复状态机**：达到 search-audit 上限后，rewrite-only issue 仍允许一次受约束的最终修订和确定性校验；只有新证据需求才消耗 research repair round。
+12. **可观测性与评测**：记录 rejection 原因（grounding/scope/number）、query filter 原因、budget saturation、dossier omission 和 citation rendering。全量分数必须同时报告 Judge total/valid/error，并在新旧运行的共同有效 ID 上比较。
+
+验收条件：
+
+- 最后一步无论模型是否输出 `finish=true`，每个 Researcher 都产生可解释终态；
+- Main 的 `continue` 决策之后必须存在 READY/PENDING task，否则确定性转为 write/partial；
+- Verify/Repair 不会被全局 query ledger 静默清空；
+- Writer 使用的每个数值要么是直接 Evidence Claim，要么有 CalculationRecord；
+- 最终 Markdown 中的所有 URL 都来自 Source Store；
+- Audit 的 rewrite-only 问题不会因为 search round 用尽而直接终止；
+- 静态、异步、动态重规划、推理网关和真实 trace 不变量测试全部通过。
+
+### 0.3 本轮实现落点和默认值
+
+| 能力 | 确定性实现 | 关键状态/默认值 |
+|---|---|---|
+| 最后一步收敛 | `agents.py` 强制 final synthesis，并区分 requested/effective/forced finish | 无证据时最后一步仍可搜索；已有证据时保留最后模型 turn 做总结 |
+| Task-scoped context | `build_global_context_slice` + `query_ledger_by_task` | 本任务 query 硬去重；global/dependency query 仅提示 |
+| Partial 重开 | `dag.py: REFINE_TASK` + `RunStore.clear_task_execution` | 保留历史 Evidence/query，删除旧 local/checkpoint/bundle；默认最多 2 次 attempt |
+| 规划分片 | `split_overloaded_tasks` | 默认每 task 最多 2 个 coverage target；下游依赖自动 fan-out |
+| 自适应预算 | `infer_research_profile/apply_adaptive_task_budgets` | standard `3 steps/18 tools`；复杂任务上限 `5 steps/36 tools/10 searches` |
+| Claim 来源要求 | Reader 输出 claim-level `required_source_types` | `primary`、`independent`、`corroborated`；task 默认不再机械要求两类来源 |
+| Evidence Gate | `coverage_details.quality_score` + weighted gate | partial task 的已满足 coverage cell 可以成为 covered |
+| Evidence 聚合 | Claim dimensions + 语义/维度去重 + coverage round-robin | dimensions 为 entity/metric/period/geography/unit/denominator/accounting_scope |
+| 派生计算 | `calculator.py` | 数字必须出现在引用 Evidence excerpt；仅开放白名单运算 |
+| 确定性引用 | `[[EVIDENCE:id]]` → `render_evidence_citations` | URL 只从 SourceRecord 注入；未知 token 不生成 URL |
+| Audit final pass | 稳定 report dossier + `audit_history` | search 上限后允许一次 rewrite-only 修订及再次校验 |
+| 评测可比性 | `scoring.py` + `scripts/compare_race_runs.py` | 汇报 total/valid/error/valid_rate，并按共同有效 ID 计算 delta |
 
 ## 1. 先把角色简化
 
@@ -365,7 +409,7 @@ LocalResearchState v0
 | ResearcherInput View | Context Builder | 本轮所需的稳定前缀、状态快照和最近 observation |
 | KV / Prefix Cache | vLLM | 可淘汰性能优化，命中与否不能影响正确性 |
 
-每个 step 的 request ID 由 `(run_id, subtask_id, local_version)` 生成；输出必须回传相同 `base_local_version`。工具结果归并后才把版本从 `vN` 提交为 `vN+1`。进程若在 step 边界中断，从 `checkpoints/<subtask_id>.json` 恢复来源、证据、Claim、usage 和最后决策，不依赖聊天历史。
+每个 step 的 request ID 由 `(run_id, subtask_id, local_version)` 生成；输出必须回传相同 `base_local_version`。工具结果归并后才把版本从 `vN` 提交为 `vN+1`。进程若在 step 边界中断，从 `checkpoints/<subtask_id>.json` 恢复来源、证据、Claim、Calculation、usage 和最后决策，不依赖聊天历史。
 
 Context Builder 使用以下顺序构造输入，以保持 Prefix Cache 友好的共同前缀：
 
@@ -560,7 +604,7 @@ AgentResult 被验证和标准化：
 
 ### 阶段 7：Strategic Replan
 
-只有当前 DAG 已没有 READY/PENDING 工作，或发生关键冲突/失败/Audit repair 时，Main 才读取全局摘要并输出增量 DAG Patch；否则 Scheduler 继续推进已有 DAG。新增 research task 若复用了已有 coverage target 或与现有 objective 高度相似，会被确定性编译器拒绝；verify/repair task 可以有意重叠。
+只有当前 DAG 已没有 READY/PENDING 工作，或发生关键冲突/失败/Audit repair 时，Main 才读取全局摘要并输出增量 DAG Patch；否则 Scheduler 继续推进已有 DAG。新增 research task 若复用了已有 coverage target 或与现有 objective 高度相似，会被确定性编译器拒绝；对于 partial/failed task，Main 使用 `REFINE_TASK` 改变方法后重开原 task id；verify/repair task 可以有意重叠。
 
 ### 阶段 8：Research Gate
 
@@ -575,7 +619,7 @@ AgentResult 被验证和标准化：
 
 ### 阶段 9：Outline and Write
 
-Writer 先依据 coverage-balanced evidence dossier 生成 evidence-backed outline，再写正文。Dossier 在每个 coverage 槽位之间轮转，并优先 corroborated、官方/一手和可比较的定量证据。每个可核验事实使用 `[说明](EXACT_URL)` 就近引用；不允许从模型记忆补充未入账事实。
+Writer 先依据 coverage-balanced evidence dossier 生成 evidence-backed outline，再写正文。Dossier 在每个 coverage 槽位之间轮转，并优先 corroborated、官方/一手和可比较的定量证据。Writer 只选择 `[[EVIDENCE:id]]`，Renderer 再从 SourceRecord 注入 `[说明](EXACT_URL)`；不允许模型拼写 URL 或从记忆补充未入账事实。
 
 ### 阶段 10：Citation Audit and Repair
 
@@ -693,12 +737,13 @@ st11、st12 并行执行，原 DAG 其他结果保留。
 
 | 设计组件 | 实现模块 |
 |---|---|
-| Global/Local State、Claim、Evidence、SubTask | `schemas.py` |
+| Global/Local State、Claim、Evidence、Calculation、SubTask | `schemas.py` |
 | JSON snapshot、Event Log、Artifact、SubTask bundle | `store.py` |
-| DAG Patch、无环校验、Ready Set | `dag.py` |
+| DAG Patch/REFINE_TASK、分片、自适应预算、无环校验、Ready Set | `dag.py` |
 | 唯一全局合并与 Research Gate | `reducer.py` |
 | Main、Researcher、Writer、Citation Auditor | `agents.py` |
 | Search、Fetch、Reader 和来源标准化 | `tools.py` |
+| Evidence-linked 白名单计算器 | `calculator.py` |
 | Prompt 协议 | `prompts.py` |
 | JSON Schema 协议 | `protocols.py` |
 | token-aware ResearcherInput View | `context.py` |
@@ -711,6 +756,7 @@ st11、st12 并行执行，原 DAG 其他结果保留。
 
 - `python -m drb_qwen.run_multi_agent_research`：单个任意问题。
 - `python -m drb_qwen.generate_reports_async_research`：DRB JSONL 批量研究。
+- `python scripts/compare_race_runs.py`：只在两次 Judge 的共同有效 task ID 上比较分数。
 - `scripts/check_pipeline_static.sh`：无 GPU 的编译、DAG、恢复、动态重规划和 Audit Repair 测试。
 
 当前持久化实现是单机 JSON durable store，适合实验和单节点运行；多节点生产部署时可以保持相同 schema，把 `RunStore` 替换为 PostgreSQL/Event Store，把外层循环迁移到 Temporal，而无需重写 Agent 协议。

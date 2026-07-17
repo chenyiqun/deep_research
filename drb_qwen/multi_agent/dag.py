@@ -20,7 +20,13 @@ from .schemas import (
 
 
 TASK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
-ALLOWED_OPERATIONS = {"ADD_TASK", "CANCEL_TASK", "ADD_DEPENDENCY", "SET_PRIORITY"}
+ALLOWED_OPERATIONS = {
+    "ADD_TASK",
+    "REFINE_TASK",
+    "CANCEL_TASK",
+    "ADD_DEPENDENCY",
+    "SET_PRIORITY",
+}
 
 
 class DecisionValidationError(ValueError):
@@ -30,6 +36,7 @@ class DecisionValidationError(ValueError):
 @dataclass
 class PatchResult:
     added_task_ids: list[str]
+    refined_task_ids: list[str]
     cancelled_task_ids: list[str]
     changed_task_ids: list[str]
     warnings: list[str]
@@ -63,6 +70,10 @@ def coerce_subtask(
         priority=max(0, min(100, safe_int(value.get("priority"), 50))),
         max_steps=max(1, min(max_steps, safe_int(value.get("max_steps"), max_steps))),
         max_tool_calls=max(1, min(max_tool_calls, safe_int(value.get("max_tool_calls"), max_tool_calls))),
+        # Search caps and profiles are assigned by deterministic runtime policy;
+        # planner output cannot expand its own budget.
+        max_search_calls=0,
+        research_profile="standard",
         required_source_types=string_list(value.get("required_source_types"), 10),
         created_by=created_by,
     )
@@ -103,6 +114,7 @@ def apply_decision_patch(
     max_steps: int,
     max_tool_calls: int,
     max_new_tasks: int | None = None,
+    max_task_attempts: int = 2,
 ) -> PatchResult:
     base_version = decision.get("base_state_version")
     if base_version is not None and safe_int(base_version, -1) != state.state_version:
@@ -114,7 +126,7 @@ def apply_decision_patch(
         raise DecisionValidationError("DecisionPatch.operations must be a list")
 
     candidate = {task_id: SubTask.from_dict(task.to_dict()) for task_id, task in state.tasks.items()}
-    result = PatchResult([], [], [], [])
+    result = PatchResult([], [], [], [], [])
     new_task_limit = max_subtasks if max_new_tasks is None else max(0, int(max_new_tasks))
     for op_index, operation in enumerate(operations, 1):
         if not isinstance(operation, dict):
@@ -141,11 +153,54 @@ def apply_decision_patch(
             )
             duplicate = find_duplicate_task(candidate, task)
             if duplicate:
-                result.warnings.append(f"duplicate objective ignored; existing task={duplicate}")
+                existing = candidate[duplicate]
+                if (
+                    existing.status in {TaskStatus.PARTIAL, TaskStatus.FAILED}
+                    and existing.attempts < max(1, max_task_attempts)
+                ):
+                    _refine_task(
+                        existing,
+                        raw_task,
+                        max_steps=max_steps,
+                        max_tool_calls=max_tool_calls,
+                    )
+                    result.refined_task_ids.append(existing.id)
+                    result.changed_task_ids.append(existing.id)
+                    result.warnings.append(
+                        f"duplicate ADD_TASK converted to REFINE_TASK; existing task={duplicate}"
+                    )
+                else:
+                    result.warnings.append(f"duplicate objective ignored; existing task={duplicate}")
                 continue
             task.id = unique_task_id(candidate, task.id, task.objective)
             candidate[task.id] = task
             result.added_task_ids.append(task.id)
+            continue
+        if op == "REFINE_TASK":
+            task_id = str(operation.get("task_id", ""))
+            task = candidate.get(task_id)
+            if task is None:
+                result.warnings.append(f"cannot refine missing task {task_id}")
+                continue
+            if task.status not in {TaskStatus.PARTIAL, TaskStatus.FAILED}:
+                result.warnings.append(
+                    f"cannot refine task {task_id} with status={task.status.value}"
+                )
+                continue
+            if task.attempts >= max(1, max_task_attempts):
+                result.warnings.append(
+                    f"cannot refine task {task_id}; max attempts reached ({task.attempts})"
+                )
+                continue
+            raw_task = operation.get("task") if isinstance(operation.get("task"), dict) else operation
+            _refine_task(
+                task,
+                raw_task,
+                max_steps=max_steps,
+                max_tool_calls=max_tool_calls,
+            )
+            result.refined_task_ids.append(task_id)
+            result.changed_task_ids.append(task_id)
             continue
         if op == "CANCEL_TASK":
             task_id = str(operation.get("task_id", ""))
@@ -183,6 +238,187 @@ def apply_decision_patch(
     validate_acyclic(candidate)
     state.tasks = candidate
     return result
+
+
+def _refine_task(
+    task: SubTask,
+    value: dict[str, Any],
+    *,
+    max_steps: int,
+    max_tool_calls: int,
+) -> None:
+    """Reopen a terminal incomplete task while preserving its identity and evidence history."""
+
+    objective = str(value.get("objective", "")).strip()
+    if objective:
+        task.objective = objective
+    rationale = str(value.get("rationale", "")).strip()
+    if rationale:
+        task.rationale = rationale
+    for target in string_list(value.get("coverage_targets"), 12):
+        if normalize_text(target) not in {
+            normalize_text(existing) for existing in task.coverage_targets
+        }:
+            task.coverage_targets.append(target)
+    if "required_source_types" in value:
+        task.required_source_types = string_list(value.get("required_source_types"), 10)
+    task.priority = max(0, min(100, safe_int(value.get("priority"), task.priority)))
+    task.max_steps = max(
+        task.max_steps,
+        max(1, min(max_steps, safe_int(value.get("max_steps"), task.max_steps))),
+    )
+    task.max_tool_calls = max(
+        task.max_tool_calls,
+        max(1, min(max_tool_calls, safe_int(value.get("max_tool_calls"), task.max_tool_calls))),
+    )
+    task.status = TaskStatus.PENDING
+    task.result_summary = ""
+    task.error = ""
+    task.updated_at = utc_now()
+
+
+COMPLEX_PROFILE_PATTERNS = {
+    "comparison": ("对比", "比较", "横向", "排名", "compare", "comparison", "ranking"),
+    "time_series": ("历年", "历史", "走势", "逐年", "cagr", "time series", "historical"),
+    "quantitative": ("量化", "占比", "幅度", "金额", "规模", "quantify", "percentage", "impact"),
+}
+
+
+def infer_research_profile(task: SubTask) -> str:
+    if task.task_type == TaskType.REPAIR:
+        return "repair"
+    if task.task_type == TaskType.VERIFY:
+        return "verify"
+    haystack = normalize_text(" ".join([task.objective, *task.coverage_targets]))
+    matched = [
+        profile
+        for profile, patterns in COMPLEX_PROFILE_PATTERNS.items()
+        if any(pattern in haystack for pattern in patterns)
+    ]
+    if len(matched) >= 2 or len(_task_concepts(task)) >= 2:
+        return "complex"
+    if matched:
+        return matched[0]
+    return "standard"
+
+
+def apply_adaptive_task_budgets(
+    state: GlobalResearchState,
+    *,
+    base_steps: int,
+    base_tool_calls: int,
+    complex_max_steps: int,
+    complex_max_tool_calls: int,
+    complex_max_search_calls: int,
+    max_queries_per_step: int,
+) -> list[dict[str, Any]]:
+    """Raise only genuinely complex task budgets; global budgets remain hard limits."""
+
+    changes: list[dict[str, Any]] = []
+    for task in state.tasks.values():
+        if task.status not in {TaskStatus.PENDING, TaskStatus.PARTIAL, TaskStatus.FAILED}:
+            continue
+        profile = infer_research_profile(task)
+        before = (task.max_steps, task.max_tool_calls, task.max_search_calls, task.research_profile)
+        if profile in {"comparison", "time_series", "quantitative", "complex", "repair"}:
+            task.max_steps = max(task.max_steps, complex_max_steps)
+            task.max_tool_calls = max(task.max_tool_calls, complex_max_tool_calls)
+            task.max_search_calls = max(task.max_search_calls, complex_max_search_calls)
+        elif profile == "verify":
+            task.max_steps = max(task.max_steps, min(complex_max_steps, base_steps + 1))
+            task.max_tool_calls = max(
+                task.max_tool_calls,
+                min(complex_max_tool_calls, base_tool_calls + max_queries_per_step * 3),
+            )
+            task.max_search_calls = max(
+                task.max_search_calls,
+                min(complex_max_search_calls, task.max_steps * max_queries_per_step),
+            )
+        else:
+            task.max_steps = max(task.max_steps, base_steps)
+            task.max_tool_calls = max(task.max_tool_calls, base_tool_calls)
+            task.max_search_calls = max(
+                task.max_search_calls,
+                min(complex_max_search_calls, task.max_steps * max_queries_per_step),
+            )
+        task.max_steps = min(task.max_steps, complex_max_steps)
+        task.max_tool_calls = min(task.max_tool_calls, complex_max_tool_calls)
+        task.max_search_calls = min(task.max_search_calls, complex_max_search_calls)
+        task.research_profile = profile
+        after = (task.max_steps, task.max_tool_calls, task.max_search_calls, task.research_profile)
+        if after != before:
+            task.updated_at = utc_now()
+            changes.append(
+                {
+                    "task_id": task.id,
+                    "profile": profile,
+                    "max_steps": task.max_steps,
+                    "max_tool_calls": task.max_tool_calls,
+                    "max_search_calls": task.max_search_calls,
+                }
+            )
+    return changes
+
+
+def split_overloaded_tasks(
+    state: GlobalResearchState,
+    *,
+    max_targets_per_task: int,
+    max_subtasks: int,
+) -> list[str]:
+    """Split broad pending research tasks and fan dependent edges out to every shard."""
+
+    chunk_size = max(1, int(max_targets_per_task))
+    added: list[str] = []
+    dependency_expansions: dict[str, list[str]] = {}
+    for task in list(state.tasks.values()):
+        targets = list(task.coverage_targets)
+        if (
+            task.status != TaskStatus.PENDING
+            or task.attempts > 0
+            or len(targets) <= chunk_size
+        ):
+            continue
+        chunks = [targets[index : index + chunk_size] for index in range(0, len(targets), chunk_size)]
+        available = max(0, max_subtasks - len(state.tasks))
+        max_chunks = 1 + available
+        if len(chunks) > max_chunks:
+            chunks = chunks[: max_chunks - 1] + [
+                [target for chunk in chunks[max_chunks - 1 :] for target in chunk]
+            ]
+        if len(chunks) <= 1:
+            continue
+        original_id = task.id
+        original_objective = task.objective
+        task.coverage_targets = chunks[0]
+        task.objective = scoped_objective(original_objective, chunks[0])
+        shard_ids = [original_id]
+        for shard_index, chunk in enumerate(chunks[1:], 2):
+            shard = SubTask.from_dict(task.to_dict())
+            shard.id = unique_task_id(state.tasks, f"{original_id}_{shard_index}", shard.objective)
+            shard.objective = scoped_objective(original_objective, chunk)
+            shard.coverage_targets = chunk
+            shard.created_by = f"{task.created_by}:split"
+            shard.created_at = utc_now()
+            shard.updated_at = shard.created_at
+            state.tasks[shard.id] = shard
+            shard_ids.append(shard.id)
+            added.append(shard.id)
+        dependency_expansions[original_id] = shard_ids
+
+    for task in state.tasks.values():
+        expanded: list[str] = []
+        for dependency in task.depends_on:
+            expanded.extend(dependency_expansions.get(dependency, [dependency]))
+        task.depends_on = list(dict.fromkeys(dep for dep in expanded if dep != task.id))
+    validate_dependencies_exist(state.tasks)
+    validate_acyclic(state.tasks)
+    return added
+
+
+def scoped_objective(objective: str, targets: list[str]) -> str:
+    scope = "；".join(targets)
+    return f"{objective} [Focused scope / 本子任务仅覆盖：{scope}]"
 
 
 def ready_tasks(state: GlobalResearchState, limit: int) -> list[SubTask]:
@@ -284,8 +520,6 @@ def find_duplicate_task(tasks: dict[str, SubTask], incoming: SubTask) -> str:
 
 def unique_task_id(tasks: dict[str, SubTask], proposed: str, objective: str) -> str:
     if proposed not in tasks:
-        return proposed
-    if normalize_text(tasks[proposed].objective) == normalize_text(objective):
         return proposed
     for suffix in range(2, 1000):
         candidate = f"{proposed}_{suffix}"

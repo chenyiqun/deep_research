@@ -1889,9 +1889,9 @@ Anthropic 的研究评测也使用 factual accuracy、citation accuracy、comple
 
 ## 16. 与当前代码的差距和迁移方案
 
-> 实现状态更新（2026-07-15）：本节记录的是实施前的差距分析。目标控制面、动态 DAG、LocalResearchState、Evidence/Claim、审计修复和持久化现在已经实现于 `drb_qwen/multi_agent/`；实际使用方式以[系统主流程](./deep_research_end_to_end_flow.md#11-当前实现映射)和仓库 README 为准。
+> 实现状态更新（2026-07-17）：本节保留的是迁移前的差距分析，不代表当前代码。当前控制面、动态 DAG、LocalResearchState、Evidence/Claim/Calculation、`REFINE_TASK`、task-scoped context、自适应预算、确定性引用、稳定 report dossier 和 rewrite-only final pass 均已实现于 `drb_qwen/multi_agent/`；准确的运行流程与默认值以[系统主流程的实现落点](./deep_research_end_to_end_flow.md#03-本轮实现落点和默认值)为准。
 
-当前 drb_qwen/deep_research_workflow.py 已具备：
+迁移前的 `drb_qwen/deep_research_workflow.py` 曾具备：
 
 - 多轮 query planning。
 - 搜索并行。
@@ -1903,7 +1903,7 @@ Anthropic 的研究评测也使用 factual accuracy、citation accuracy、comple
 - 最终报告生成。
 - trace、RACE 和轻量 FACT 评测。
 
-这是合适的 MVP 骨架。主要差距如下：
+它曾是合适的 MVP 骨架。下表是迁移前差距，现有实现不再以此表作为状态说明：
 
 | 当前实现 | 目标设计 |
 |---|---|

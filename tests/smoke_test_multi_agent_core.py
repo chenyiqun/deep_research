@@ -5,11 +5,14 @@ from tempfile import TemporaryDirectory
 from drb_qwen.multi_agent.dag import (
     DecisionValidationError,
     add_initial_tasks,
+    apply_adaptive_task_budgets,
     apply_decision_patch,
     ready_tasks,
+    split_overloaded_tasks,
 )
-from drb_qwen.multi_agent.agents import build_evidence_packet
-from drb_qwen.multi_agent.reducer import merge_research_bundle
+from drb_qwen.multi_agent.agents import build_evidence_packet, render_evidence_citations
+from drb_qwen.multi_agent.calculator import execute_calculation_proposals
+from drb_qwen.multi_agent.reducer import evaluate_research_gate, merge_research_bundle
 from drb_qwen.multi_agent.schemas import (
     AgentResult,
     ClaimRecord,
@@ -58,6 +61,7 @@ def main() -> None:
     assert source_independence_group("https://blog.example.com/b") == "example.com"
     assert source_independence_group("https://news.example.co.uk/a") == "example.co.uk"
     assert classify_source_authority("https://www.gov.cn/data")[0] == "official"
+    assert classify_source_authority("https://www.gold.org/goldhub/data")[0] == "primary"
     assert classify_source_authority("https://baijiahao.baidu.com/s?id=1")[0] == "community"
     assert classify_source_authority(
         "https://baijiahao.baidu.com/s?id=2",
@@ -192,6 +196,55 @@ def main() -> None:
     assert duplicate_result.added_task_ids == ["finance_verify"]
     assert any("duplicate objective" in warning for warning in duplicate_result.warnings)
 
+    refinable = GlobalResearchState(run_id="refine", task={"prompt": "refine"})
+    refinable.tasks["partial"] = SubTask(
+        id="partial",
+        objective="Find historical data",
+        status=TaskStatus.PARTIAL,
+        attempts=1,
+    )
+    refinable.bump_version()
+    refined = apply_decision_patch(
+        refinable,
+        {
+            "base_state_version": refinable.state_version,
+            "operations": [
+                {
+                    "op": "REFINE_TASK",
+                    "task_id": "partial",
+                    "objective": "Find official historical data by year",
+                    "required_source_types": ["primary"],
+                }
+            ],
+        },
+        max_subtasks=5,
+        max_steps=3,
+        max_tool_calls=9,
+    )
+    assert refined.refined_task_ids == ["partial"]
+    assert refinable.tasks["partial"].status == TaskStatus.PENDING
+    assert refinable.tasks["partial"].attempts == 1
+
+    broad = GlobalResearchState(run_id="broad", task={"prompt": "compare"})
+    broad.tasks["matrix"] = SubTask(
+        id="matrix",
+        objective="比较多家公司融资、分红、信用评级和增长历史",
+        coverage_targets=["融资", "分红", "评级", "增长"],
+    )
+    split_ids = split_overloaded_tasks(broad, max_targets_per_task=2, max_subtasks=5)
+    assert split_ids == ["matrix_2"]
+    budget_changes = apply_adaptive_task_budgets(
+        broad,
+        base_steps=3,
+        base_tool_calls=18,
+        complex_max_steps=5,
+        complex_max_tool_calls=36,
+        complex_max_search_calls=10,
+        max_queries_per_step=3,
+    )
+    assert budget_changes
+    assert all(task.max_steps == 5 for task in broad.tasks.values())
+
     assert excerpt_is_grounded("Quoted   evidence.", "Before quoted evidence. After")
     assert not excerpt_is_grounded("invented evidence", "The source says something else.")
     no_fetch = URLFetchResult(url="https://example.com/sogou", ok=False)
@@ -307,6 +360,102 @@ def main() -> None:
     packet = build_evidence_packet(relation_state)
     assert len(packet[0]["supports"]) == 1
     assert len(packet[0]["refutes"]) == 1
+
+    quality_state = GlobalResearchState(run_id="quality", task={"prompt": "quality"})
+    quality_state.tasks["st"] = SubTask(
+        id="st",
+        objective="official statistic",
+        coverage_targets=["official statistic"],
+    )
+    quality_bundle = ResearchExecutionBundle(
+        result=AgentResult(
+            subtask_id="st",
+            status=TaskStatus.PARTIAL,
+            answer_summary="usable evidence",
+            source_ids=["official"],
+            evidence_ids=["quality_ev"],
+            claim_ids=["quality_claim"],
+        ),
+        local_state=LocalResearchState(run_id="quality", subtask_id="st", objective="official statistic"),
+        sources=[
+            SourceRecord(
+                id="official",
+                url="https://www.gov.cn/stat",
+                title="official",
+                query="q",
+                source_type="official",
+                authority_score=0.95,
+                independence_group="gov.cn",
+            )
+        ],
+        evidence=[
+            EvidenceRecord(
+                id="quality_ev",
+                source_id="official",
+                subtask_id="st",
+                claim_text="The official value is 12 out of 30.",
+                excerpt="The official value is 12 out of 30.",
+            )
+        ],
+        claims=[
+            ClaimRecord(
+                id="quality_claim",
+                text="The official value is 12 out of 30.",
+                subtask_id="st",
+                evidence_ids=["quality_ev"],
+                dimensions={"entity": "official", "metric": "value", "period": "2025"},
+            )
+        ],
+    )
+    merge_research_bundle(quality_state, quality_bundle)
+    assert quality_state.coverage["official statistic"] == "covered"
+    gate = evaluate_research_gate(
+        quality_state,
+        min_total_claims=1,
+        min_coverage_ratio=0.6,
+        budget_exhausted=False,
+    )
+    assert gate.passed
+
+    calculations, calculation_errors = execute_calculation_proposals(
+        [
+            {
+                "operation": "percentage",
+                "inputs": [
+                    {"label": "numerator", "value": 12, "evidence_id": "quality_ev"},
+                    {"label": "denominator", "value": 30, "evidence_id": "quality_ev"},
+                ],
+                "unit": "%",
+                "scope": "official, 2025, same statistical scope",
+            }
+        ],
+        evidence=quality_state.evidence,
+        subtask_id="st",
+    )
+    assert not calculation_errors
+    assert calculations[0].result == 40.0
+    rankings, ranking_errors = execute_calculation_proposals(
+        [
+            {
+                "operation": "rank",
+                "direction": "higher",
+                "inputs": [
+                    {"label": "target", "value": 12, "evidence_id": "quality_ev"},
+                    {"label": "competitor", "value": 30, "evidence_id": "quality_ev"},
+                ],
+                "scope": "same entity set, metric, period, and unit",
+            }
+        ],
+        evidence=quality_state.evidence,
+        subtask_id="st",
+    )
+    assert not ranking_errors
+    assert rankings[0].result == 2.0
+    rendered = render_evidence_citations(
+        "Supported fact [[EVIDENCE:quality_ev]].",
+        quality_state,
+    )
+    assert "[official](https://www.gov.cn/stat)" in rendered
 
     with TemporaryDirectory() as directory:
         store = RunStore(directory)

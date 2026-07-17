@@ -266,8 +266,25 @@ class ResearcherContextBuilder:
             return prompt, tokens
 
         prompt, tokens = render()
-        while tokens > self.max_input_tokens and local_view["recent_observations"]:
+        while tokens > self.max_input_tokens and len(local_view["recent_observations"]) > 1:
             local_view["recent_observations"].pop(0)
+            prompt, tokens = render()
+
+        # Preserve at least the newest observation whenever possible. Its
+        # beginning carries the freshest evidence IDs/summary; trim verbose
+        # source text before dropping the entire observation.
+        if tokens > self.max_input_tokens and local_view["recent_observations"]:
+            newest = local_view["recent_observations"][-1]
+            for text_limit in (800, 400, 200):
+                local_view["recent_observations"][-1] = compact_nested_text(
+                    newest,
+                    max_text_chars=text_limit,
+                )
+                prompt, tokens = render()
+                if tokens <= self.max_input_tokens:
+                    break
+        if tokens > self.max_input_tokens and local_view["recent_observations"]:
+            local_view["recent_observations"].clear()
             prompt, tokens = render()
 
         claims = global_view.get("existing_claims", [])
@@ -317,6 +334,7 @@ def local_research_view(local: LocalResearchState, recent_observation_limit: int
         "source_ids": local.source_ids[-96:],
         "evidence_ids": local.evidence_ids[-160:],
         "claim_ids": local.claim_ids[-160:],
+        "calculation_ids": local.calculation_ids[-64:],
         "gaps": local.gaps[-32:],
         "resolved_gaps": local.resolved_gaps[-32:],
         "conflicts": local.conflicts[-24:],
@@ -326,3 +344,16 @@ def local_research_view(local: LocalResearchState, recent_observation_limit: int
         "answer_summary": local.answer_summary[:6000],
         "stop_reason": local.stop_reason,
     }
+
+
+def compact_nested_text(value: Any, *, max_text_chars: int) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_text_chars else value[:max_text_chars] + "...[truncated]"
+    if isinstance(value, list):
+        return [compact_nested_text(item, max_text_chars=max_text_chars) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: compact_nested_text(item, max_text_chars=max_text_chars)
+            for key, item in value.items()
+        }
+    return value

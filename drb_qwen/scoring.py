@@ -109,7 +109,13 @@ def normalize_pair_scores(weighted_scores: dict[str, Any]) -> dict[str, float]:
 
 def summarize_race(results: list[dict[str, Any]]) -> dict[str, float]:
     valid = [row for row in results if not row.get("error")]
-    summary = {"n": float(len(valid))}
+    summary = {
+        "total_rows": float(len(results)),
+        "valid_rows": float(len(valid)),
+        "error_rows": float(len(results) - len(valid)),
+        "valid_rate": len(valid) / len(results) if results else 0.0,
+        "n": float(len(valid)),
+    }
     for key in [*DIMENSIONS, "overall_score"]:
         values = [safe_float(row.get(key), 0.0) for row in valid]
         summary[key] = mean(values) if values else 0.0
@@ -147,4 +153,3 @@ def summarize_fact(rows: list[dict[str, Any]]) -> dict[str, float]:
         if total_citations
         else 0.0,
     }
-

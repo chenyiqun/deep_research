@@ -44,6 +44,11 @@ MAX_SUBTASKS="${MAX_SUBTASKS:-16}"
 MAX_NEW_TASKS_PER_ROUND="${MAX_NEW_TASKS_PER_ROUND:-3}"
 MAX_REACT_STEPS="${MAX_REACT_STEPS:-3}"
 MAX_TOOL_CALLS_PER_SUBTASK="${MAX_TOOL_CALLS_PER_SUBTASK:-18}"
+COMPLEX_TASK_MAX_STEPS="${COMPLEX_TASK_MAX_STEPS:-5}"
+COMPLEX_TASK_MAX_TOOL_CALLS="${COMPLEX_TASK_MAX_TOOL_CALLS:-36}"
+COMPLEX_TASK_MAX_SEARCH_CALLS="${COMPLEX_TASK_MAX_SEARCH_CALLS:-10}"
+MAX_TARGETS_PER_SUBTASK="${MAX_TARGETS_PER_SUBTASK:-2}"
+MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-2}"
 MAX_TOTAL_TOOL_CALLS="${MAX_TOTAL_TOOL_CALLS:-160}"
 MAX_TOTAL_SEARCHES="${MAX_TOTAL_SEARCHES:-30}"
 MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-1000000}"
@@ -139,6 +144,10 @@ echo "Max rounds: ${MAX_ROUNDS}"
 echo "Max researchers per run: ${MAX_RESEARCHERS}"
 echo "Max subtasks per run: ${MAX_SUBTASKS}"
 echo "Max ReAct steps per subtask: ${MAX_REACT_STEPS}"
+echo "Base tool calls per subtask: ${MAX_TOOL_CALLS_PER_SUBTASK}"
+echo "Complex task limits: steps=${COMPLEX_TASK_MAX_STEPS} tools=${COMPLEX_TASK_MAX_TOOL_CALLS} searches=${COMPLEX_TASK_MAX_SEARCH_CALLS}"
+echo "Max coverage targets per subtask: ${MAX_TARGETS_PER_SUBTASK}"
+echo "Max task attempts: ${MAX_TASK_ATTEMPTS}"
 echo "Max total tool calls per run: ${MAX_TOTAL_TOOL_CALLS}"
 echo "Audit repair reserved searches: ${AUDIT_REPAIR_SEARCH_RESERVE}"
 echo "Audit repair reserved tool calls: ${AUDIT_REPAIR_TOOL_RESERVE}"
@@ -240,6 +249,11 @@ PYTHONPATH="${REPO_DIR}" python -m drb_qwen.generate_reports_async_research \
   --max-new-tasks-per-round "${MAX_NEW_TASKS_PER_ROUND}" \
   --max-react-steps "${MAX_REACT_STEPS}" \
   --max-tool-calls-per-subtask "${MAX_TOOL_CALLS_PER_SUBTASK}" \
+  --complex-task-max-steps "${COMPLEX_TASK_MAX_STEPS}" \
+  --complex-task-max-tool-calls "${COMPLEX_TASK_MAX_TOOL_CALLS}" \
+  --complex-task-max-search-calls "${COMPLEX_TASK_MAX_SEARCH_CALLS}" \
+  --max-targets-per-subtask "${MAX_TARGETS_PER_SUBTASK}" \
+  --max-task-attempts "${MAX_TASK_ATTEMPTS}" \
   --max-total-tool-calls "${MAX_TOTAL_TOOL_CALLS}" \
   --max-total-searches "${MAX_TOTAL_SEARCHES}" \
   --max-total-tokens "${MAX_TOTAL_TOKENS}" \
